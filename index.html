@@ -286,7 +286,7 @@ dialog::backdrop{background:rgba(26,24,35,.45)}
       <button class="menu-action" id="changeName">Naam wijzigen</button>
       <button class="menu-action" id="reloadBtn">Voortgang vernieuwen</button>
     </section>
-    <p class="help">De paarse stippellijn is de dorpsgrens. Alleen straten en huizen binnen die grens zijn actief. In Huizen blijven afgeronde straten groen en straten die bezig zijn oranje zichtbaar. Afgeronde huizen vervangen de grijze stip, blijven na opnieuw openen groen zichtbaar en zijn als enige huisstatus ook zichtbaar wanneer u terugschakelt naar Straten. Huisnummers verschijnen automatisch wanneer u voldoende inzoomt. Houd een straat of huis ingedrukt om deze direct af te ronden; tik kort voor meer opties. In Huizen kunt u via “Selecteer huizen” losse huizen aantikken of met “Vak” meerdere huizen tegelijk selecteren.</p>
+    <p class="help">De paarse stippellijn is de dorpsgrens. Alleen straten en huizen binnen die grens zijn actief. In Huizen blijven afgeronde straten groen en straten die bezig zijn oranje zichtbaar. Afgeronde huizen vervangen de grijze stip, blijven na opnieuw openen groen zichtbaar en zijn als enige huisstatus ook zichtbaar wanneer u terugschakelt naar Straten. Huisnummers verschijnen automatisch wanneer u voldoende inzoomt. Houd een straat of huis ingedrukt om deze direct af te ronden; tik kort voor meer opties. In Straten wordt iedere straat vanaf voldoende inzoomen automatisch verdeeld in stukken van ongeveer 50 meter. Zo kunt u precies het laatste deel op Bezig of Afgerond zetten en zien anderen waar u bent gestopt. In Huizen staat er per adres één bolletje; via “Selecteer huizen” kunt u losse huizen aantikken of met “Vak” meerdere huizen tegelijk selecteren.</p>
   </div>
 </dialog>
 
@@ -370,6 +370,11 @@ let bulkSelectMode=false;
 let bulkDrawMode=false;
 let bulkSelectedItems=[];
 let bulkStart=null;
+let houseRenderSignature="";
+let houseRefreshTimer=null;
+let streetSegmentSignature="";
+let streetSegmentRefreshTimer=null;
+const STREET_SEGMENT_METERS=50;
 
 function slug(s){return String(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,120)}
 function streetId(place,name){return `street:${slug(place)}:${slug(name)}`}
@@ -568,6 +573,35 @@ function setupTodoLayers(){
     }
   });
 
+
+  safeAddLayer({
+    id:"app-street-segments",type:"line",source:"app-street-segments",minzoom:14,
+    paint:{
+      "line-color":["match",["get","status"],"doing",STATUS.doing,"done",STATUS.done,STATUS.todo],
+      "line-width":["interpolate",["linear"],["zoom"],14,4,16,6,19,8],
+      "line-opacity":0.95
+    }
+  });
+
+  safeAddLayer({
+    id:"app-street-segments-outline",type:"line",source:"app-street-segments",minzoom:14,
+    paint:{
+      "line-color":"#ffffff",
+      "line-width":["interpolate",["linear"],["zoom"],14,1,16,1.5,19,2],
+      "line-opacity":0.5,
+      "line-gap-width":["interpolate",["linear"],["zoom"],14,5,16,7,19,10]
+    }
+  });
+
+  safeAddLayer({
+    id:"app-street-segments-hitbox",type:"line",source:"app-street-segments",minzoom:14,
+    paint:{
+      "line-color":"#000000",
+      "line-width":["interpolate",["linear"],["zoom"],14,18,16,24,19,32],
+      "line-opacity":0.001
+    }
+  });
+
   safeAddLayer({
     id:"todo-houses",type:"circle",source:vectorSource,"source-layer":"housenumber",
     minzoom:16,
@@ -598,6 +632,49 @@ function setupTodoLayers(){
   if(!map.getSource("house-selection")){
     map.addSource("house-selection",{type:"geojson",data:{type:"FeatureCollection",features:[]}});
   }
+  if(!map.getSource("app-houses")){
+    map.addSource("app-houses",{type:"geojson",data:{type:"FeatureCollection",features:[]}});
+  }
+  if(!map.getSource("app-street-segments")){
+    map.addSource("app-street-segments",{type:"geojson",data:{type:"FeatureCollection",features:[]}});
+  }
+  safeAddLayer({
+    id:"app-house-dots",type:"circle",source:"app-houses",minzoom:16,
+    paint:{
+      "circle-radius":["interpolate",["linear"],["zoom"],16,5,18,8,20,10],
+      "circle-color":["match",["get","status"],"doing",STATUS.doing,"done",STATUS.done,STATUS.todo],
+      "circle-stroke-color":"#ffffff",
+      "circle-stroke-width":2,
+      "circle-opacity":0.96
+    }
+  });
+
+  safeAddLayer({
+    id:"app-house-labels",type:"symbol",source:"app-houses",minzoom:17,
+    layout:{
+      "text-field":["get","house_number"],
+      "text-size":["interpolate",["linear"],["zoom"],17,10,20,13],
+      "text-offset":[0,-1.55],
+      "text-anchor":"bottom",
+      "text-allow-overlap":false
+    },
+    paint:{
+      "text-color":"#4E4A58",
+      "text-halo-color":"#ffffff",
+      "text-halo-width":1.5
+    }
+  });
+
+  safeAddLayer({
+    id:"app-house-hitbox",type:"circle",source:"app-houses",minzoom:16,
+    paint:{
+      "circle-radius":["interpolate",["linear"],["zoom"],16,15,18,20,20,24],
+      "circle-color":"#000000",
+      "circle-opacity":0.001,
+      "circle-stroke-opacity":0
+    }
+  });
+
   safeAddLayer({
     id:"house-mask-dots",type:"circle",source:"house-mask",minzoom:16,
     paint:{
@@ -634,28 +711,318 @@ function setupTodoLayers(){
   updateStatusVisuals();
 }
 
-function updateStatusVisuals(){
-  if(!mapReady) return;
-  const doneNames=[],doingNames=[];
-  const houseFeatures=[];
-  const maskFeatures=[];
+
+function houseDistanceMeters(lon1,lat1,lon2,lat2){
+  const avgLat=((lat1+lat2)/2)*Math.PI/180;
+  const dx=(lon2-lon1)*111320*Math.cos(avgLat);
+  const dy=(lat2-lat1)*110540;
+  return Math.hypot(dx,dy);
+}
+
+function findSavedHouseState(num,lon,lat){
+  const exactId=houseId(currentPlace,num,lon,lat);
+  if(states.has(exactId)) return states.get(exactId);
+
+  let best=null,bestD=Infinity;
   for(const s of states.values()){
-    if(s.item_type==="street"){
-      if(s.status==="done") doneNames.push(s.name);
-      if(s.status==="doing") doingNames.push(s.name);
+    if(s.item_type!=="house" || s.place!==currentPlace) continue;
+    if(String(s.house_number||"").toLowerCase()!==String(num||"").toLowerCase()) continue;
+    if(!Number.isFinite(Number(s.lon)) || !Number.isFinite(Number(s.lat))) continue;
+    const d=houseDistanceMeters(lon,lat,Number(s.lon),Number(s.lat));
+    if(d<bestD){bestD=d;best=s;}
+  }
+  // Alleen koppelen als het opgeslagen punt echt bij dit huis ligt.
+  return bestD<=22 ? best : null;
+}
+
+function refreshVisibleHouses(){
+  if(!mapReady || !vectorSource || !map.getSource("app-houses")) return;
+  if(map.getZoom()<15.5){
+    if(houseRenderSignature!=="empty"){
+      map.getSource("app-houses").setData({type:"FeatureCollection",features:[]});
+      houseRenderSignature="empty";
     }
-    if(s.item_type==="house" && Number.isFinite(Number(s.lon)) && Number.isFinite(Number(s.lat)) && s.status!=="todo"){
-      const coords=[Number(s.lon),Number(s.lat)];
-      houseFeatures.push({type:"Feature",geometry:{type:"Point",coordinates:coords},properties:{id:s.id,status:s.status,name:s.name}});
-      maskFeatures.push({type:"Feature",geometry:{type:"Point",coordinates:coords},properties:{id:s.id}});
+    return;
+  }
+
+  let raw=[];
+  try{
+    raw=map.querySourceFeatures(vectorSource,{sourceLayer:"housenumber"})||[];
+  }catch(e){
+    console.warn("Huizen konden niet worden gelezen",e);
+    return;
+  }
+
+  const dedupe=new Map();
+  for(const f of raw){
+    const coords=f.geometry?.coordinates;
+    if(!Array.isArray(coords) || !Number.isFinite(Number(coords[0])) || !Number.isFinite(Number(coords[1]))) continue;
+    const lon=Number(coords[0]),lat=Number(coords[1]);
+    if(Math.abs(lon)>180 || Math.abs(lat)>90) continue;
+    if(!inCurrentPlace(lon,lat)) continue;
+
+    const p=f.properties||{};
+    const num=String(p.housenumber ?? p.house_number ?? p["addr:housenumber"] ?? p.name ?? "").trim();
+    if(!num) continue;
+    const street=p.street ?? p["addr:street"] ?? null;
+
+    // Vector tiles kunnen hetzelfde adres uit aangrenzende tiles dubbel teruggeven.
+    const key=`${num.toLowerCase()}|${lat.toFixed(6)}|${lon.toFixed(6)}`;
+    if(dedupe.has(key)) continue;
+
+    const saved=findSavedHouseState(num,lon,lat);
+    const status=saved?.status || "todo";
+    const id=saved?.id || houseId(currentPlace,num,lon,lat);
+
+    dedupe.set(key,{
+      type:"Feature",
+      geometry:{type:"Point",coordinates:[lon,lat]},
+      properties:{
+        id,
+        status,
+        house_number:num,
+        street_name:street||"",
+        name:street?`${street} ${num}`:`Huis ${num}`,
+        lon,lat
+      }
+    });
+  }
+
+  const features=[...dedupe.values()];
+  features.sort((a,b)=>String(a.properties.id).localeCompare(String(b.properties.id)));
+  const sig=features.map(f=>`${f.properties.id}:${f.properties.status}:${f.geometry.coordinates[0].toFixed(6)}:${f.geometry.coordinates[1].toFixed(6)}`).join("|");
+  if(sig===houseRenderSignature) return;
+  houseRenderSignature=sig;
+  map.getSource("app-houses").setData({type:"FeatureCollection",features});
+}
+
+function scheduleHouseRefresh(){
+  clearTimeout(houseRefreshTimer);
+  houseRefreshTimer=setTimeout(refreshVisibleHouses,120);
+}
+
+function houseItemFromAppFeature(f){
+  if(!f) return null;
+  const p=f.properties||{};
+  const coords=f.geometry?.coordinates;
+  const lon=Number(p.lon ?? coords?.[0]);
+  const lat=Number(p.lat ?? coords?.[1]);
+  if(!Number.isFinite(lon)||!Number.isFinite(lat)) return null;
+  return {
+    id:String(p.id || houseId(currentPlace,p.house_number||"huis",lon,lat)),
+    item_type:"house",
+    place:currentPlace,
+    name:String(p.name || `Huis ${p.house_number||""}`).trim(),
+    street_name:p.street_name||null,
+    house_number:String(p.house_number||""),
+    lat,lon
+  };
+}
+
+
+function streetMeters(a,b){
+  const lat1=a[1]*Math.PI/180, lat2=b[1]*Math.PI/180;
+  const dLat=(b[1]-a[1])*Math.PI/180;
+  const dLon=(b[0]-a[0])*Math.PI/180;
+  const h=Math.sin(dLat/2)**2 + Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
+  return 6371000*2*Math.atan2(Math.sqrt(h),Math.sqrt(1-h));
+}
+
+function lerpCoord(a,b,t){
+  return [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t];
+}
+
+function normalizedSegmentId(place,name,a,b){
+  const p1=[Number(a[0]).toFixed(5),Number(a[1]).toFixed(5)];
+  const p2=[Number(b[0]).toFixed(5),Number(b[1]).toFixed(5)];
+  const s1=`${p1[0]},${p1[1]}`, s2=`${p2[0]},${p2[1]}`;
+  const first=s1<s2?s1:s2, second=s1<s2?s2:s1;
+  return `streetseg:${slug(place)}:${slug(name)}:${first}:${second}`;
+}
+
+function splitLineIntoPieces(coords,maxMeters=STREET_SEGMENT_METERS){
+  if(!Array.isArray(coords) || coords.length<2) return [];
+  const out=[];
+  let current=[coords[0]];
+  let remaining=maxMeters;
+
+  for(let i=1;i<coords.length;i++){
+    let a=current[current.length-1];
+    const b=coords[i];
+    let d=streetMeters(a,b);
+
+    if(!Number.isFinite(d) || d<=0){
+      current.push(b);
+      continue;
+    }
+
+    while(d>remaining){
+      const t=remaining/d;
+      const cut=lerpCoord(a,b,t);
+      current.push(cut);
+      if(current.length>=2) out.push(current);
+      current=[cut];
+      a=cut;
+      d=streetMeters(a,b);
+      remaining=maxMeters;
+    }
+
+    current.push(b);
+    remaining-=d;
+
+    if(remaining<=1){
+      if(current.length>=2) out.push(current);
+      current=[b];
+      remaining=maxMeters;
     }
   }
+
+  if(current.length>=2 && streetMeters(current[0],current[current.length-1])>4){
+    out.push(current);
+  }
+  return out;
+}
+
+function segmentMidpoint(coords){
+  if(!coords?.length) return null;
+  let total=0;
+  const ds=[];
+  for(let i=1;i<coords.length;i++){
+    const d=streetMeters(coords[i-1],coords[i]);
+    ds.push(d); total+=d;
+  }
+  if(!total) return coords[0];
+  const target=total/2;
+  let acc=0;
+  for(let i=1;i<coords.length;i++){
+    if(acc+ds[i-1]>=target){
+      const t=(target-acc)/ds[i-1];
+      return lerpCoord(coords[i-1],coords[i],t);
+    }
+    acc+=ds[i-1];
+  }
+  return coords[Math.floor(coords.length/2)];
+}
+
+function segmentState(id,streetName){
+  const exact=states.get(id);
+  if(exact) return exact;
+  // Bestaande status van de hele straat blijft als fallback geldig.
+  return states.get(streetId(currentPlace,streetName)) || null;
+}
+
+function refreshStreetSegments(){
+  if(!mapReady || !vectorSource || !map.getSource("app-street-segments")) return;
+  if(map.getZoom()<13.8){
+    if(streetSegmentSignature!=="empty"){
+      map.getSource("app-street-segments").setData({type:"FeatureCollection",features:[]});
+      streetSegmentSignature="empty";
+    }
+    return;
+  }
+
+  let raw=[];
+  try{
+    raw=map.querySourceFeatures(vectorSource,{sourceLayer:"transportation_name"})||[];
+  }catch(e){
+    console.warn("Straatdelen konden niet worden gelezen",e);
+    return;
+  }
+
+  const features=new Map();
+
+  for(const f of raw){
+    const name=String(f.properties?.name||"").trim();
+    if(!name) continue;
+
+    let lines=[];
+    if(f.geometry?.type==="LineString") lines=[f.geometry.coordinates];
+    else if(f.geometry?.type==="MultiLineString") lines=f.geometry.coordinates;
+    else continue;
+
+    for(const line of lines){
+      if(!Array.isArray(line)||line.length<2) continue;
+
+      // Alleen delen binnen het actieve dorp gebruiken.
+      const inside=line.filter(c=>Array.isArray(c)&&Number.isFinite(Number(c[0]))&&Number.isFinite(Number(c[1])));
+      if(inside.length<2) continue;
+
+      const pieces=splitLineIntoPieces(inside,STREET_SEGMENT_METERS);
+      for(const coords of pieces){
+        const mid=segmentMidpoint(coords);
+        if(!mid || !inCurrentPlace(mid[0],mid[1])) continue;
+
+        const a=coords[0], b=coords[coords.length-1];
+        const id=normalizedSegmentId(currentPlace,name,a,b);
+        if(features.has(id)) continue;
+
+        const saved=segmentState(id,name);
+        const status=saved?.status || "todo";
+
+        features.set(id,{
+          type:"Feature",
+          geometry:{type:"LineString",coordinates:coords},
+          properties:{
+            id,
+            status,
+            name,
+            street_name:name,
+            lat:mid[1],
+            lon:mid[0]
+          }
+        });
+      }
+    }
+  }
+
+  const list=[...features.values()];
+  list.sort((a,b)=>String(a.properties.id).localeCompare(String(b.properties.id)));
+  const sig=list.map(f=>`${f.properties.id}:${f.properties.status}`).join("|");
+  if(sig===streetSegmentSignature) return;
+  streetSegmentSignature=sig;
+  map.getSource("app-street-segments").setData({type:"FeatureCollection",features:list});
+}
+
+function scheduleStreetSegmentRefresh(){
+  clearTimeout(streetSegmentRefreshTimer);
+  streetSegmentRefreshTimer=setTimeout(refreshStreetSegments,120);
+}
+
+function streetSegmentItemFromFeature(f){
+  if(!f) return null;
+  const p=f.properties||{};
+  const coords=f.geometry?.coordinates;
+  const mid=segmentMidpoint(coords);
+  const lon=Number(p.lon ?? mid?.[0]);
+  const lat=Number(p.lat ?? mid?.[1]);
+  const name=String(p.street_name || p.name || "Straat").trim();
+  if(!p.id || !Number.isFinite(lon) || !Number.isFinite(lat)) return null;
+
+  return {
+    id:String(p.id),
+    item_type:"street",
+    place:currentPlace,
+    name:`${name} · straatdeel`,
+    street_name:name,
+    house_number:null,
+    lat,lon
+  };
+}
+
+function updateStatusVisuals(){
+  if(!mapReady) return;
+
+  const doneNames=[],doingNames=[];
+  for(const s of states.values()){
+    if(s.item_type==="street" && !String(s.id||"").startsWith("streetseg:")){
+      const streetName=s.street_name || s.name;
+      if(s.status==="done") doneNames.push(streetName);
+      if(s.status==="doing") doingNames.push(streetName);
+    }
+  }
+
   if(map.getLayer("done-streets")) map.setFilter("done-streets",doneNames.length?["in",["get","name"],["literal",doneNames]]:["==",["get","name"],"__none__"]);
   if(map.getLayer("doing-streets")) map.setFilter("doing-streets",doingNames.length?["in",["get","name"],["literal",doingNames]]:["==",["get","name"],"__none__"]);
-  const src=map.getSource("house-status");
-  if(src) src.setData({type:"FeatureCollection",features:houseFeatures});
-  const maskSrc=map.getSource("house-mask");
-  if(maskSrc) maskSrc.setData({type:"FeatureCollection",features:maskFeatures});
 
   if(map.getLayer("todo-streets")){
     const todoHidden=[...doneNames,...doingNames];
@@ -664,43 +1031,28 @@ function updateStatusVisuals(){
       todoHidden.length ? ["all",["has","name"],["!",["in",["get","name"],["literal",todoHidden]]]] : ["has","name"]
     );
   }
+
   if(map.getLayer("done-streets")) map.setLayoutProperty("done-streets","visibility",(currentFilter==="all"||currentFilter==="done")?"visible":"none");
   if(map.getLayer("doing-streets")) map.setLayoutProperty("doing-streets","visibility",(currentFilter==="all"||currentFilter==="doing")?"visible":"none");
-  if(map.getLayer("todo-houses")) map.setLayoutProperty("todo-houses","visibility",(currentMode==="house"&&(currentFilter==="all"||currentFilter==="todo"))?"visible":"none");
-  if(map.getLayer("house-status-dots")){
-    const all=houseFeatures.filter(f=>{
-      const status=f.properties.status;
-      if(currentMode==="street"){
-        // In Straten-modus alleen afgeronde huizen tonen.
-        if(status!=="done") return false;
-        return currentFilter==="all" || currentFilter==="done";
-      }
-      return currentFilter==="all" || status===currentFilter;
-    });
-    map.getSource("house-status")?.setData({type:"FeatureCollection",features:all});
-  }
-  if(map.getLayer("house-mask-dots")){
-    const visibleMask=maskFeatures.filter((f)=>{
-      const id=f.properties?.id;
-      const s=id?states.get(id):null;
-      if(!s) return false;
-      if(currentMode==="street"){
-        // Alleen een maskerpunt tonen voor afgeronde huizen, omdat alleen die groen zichtbaar zijn.
-        return s.status==="done" && (currentFilter==="all" || currentFilter==="done");
-      }
-      return currentFilter==="all" || s.status===currentFilter;
-    });
-    map.getSource("house-mask")?.setData({type:"FeatureCollection",features:visibleMask});
-  }
+
+  // Oude dubbele huislagen worden niet meer gebruikt.
+  ["todo-houses","house-hitbox","house-mask-dots","house-status-dots"].forEach(id=>{
+    if(map.getLayer(id)) map.setLayoutProperty(id,"visibility","none");
+  });
+
+  houseRenderSignature="";
+  streetSegmentSignature="";
+  refreshVisibleHouses();
+  refreshStreetSegments();
   applyModeVisibility();
 }
 function applyModeVisibility(){
   if(map.getLayer("todo-streets")){
+    // Altijd de grijze basis van alle nog niet volledig afgeronde straten tonen.
+    // De gekleurde straatdelen komen hier bovenop te liggen.
     map.setLayoutProperty("todo-streets","visibility",currentMode==="street"?"visible":"none");
   }
 
-  // Afgevinkte/actieve straten blijven ook zichtbaar in Huizen-modus,
-  // zodat je tijdens het huis-voor-huis werken ziet welke straten al gedaan zijn.
   if(map.getLayer("doing-streets")){
     const showDoing=(currentFilter==="all"||currentFilter==="doing");
     map.setLayoutProperty("doing-streets","visibility",showDoing?"visible":"none");
@@ -710,31 +1062,76 @@ function applyModeVisibility(){
     map.setLayoutProperty("done-streets","visibility",showDone?"visible":"none");
   }
 
-  if(map.getLayer("todo-houses")){
-    map.setLayoutProperty(
-      "todo-houses","visibility",
-      currentMode==="house"&&(currentFilter==="all"||currentFilter==="todo")?"visible":"none"
-    );
-  }
-  if(map.getLayer("house-hitbox")){
-    map.setLayoutProperty("house-hitbox","visibility",currentMode==="house"?"visible":"none");
-  }
-  // Afgeronde / actieve huizen blijven ook in Straten-modus zichtbaar.
-  // Alleen de grijze "nog te doen"-huizen zijn exclusief voor Huizen-modus.
-  if(map.getLayer("house-mask-dots")){
-    map.setLayoutProperty("house-mask-dots","visibility","visible");
-  }
-  if(map.getLayer("house-status-dots")){
-    map.setLayoutProperty("house-status-dots","visibility","visible");
+  // Eén enkele huizenlaag bepaalt nu alle kleuren.
+  if(map.getLayer("app-house-dots")){
+    if(currentMode==="street"){
+      map.setFilter("app-house-dots",
+        (currentFilter==="all"||currentFilter==="done")
+          ? ["==",["get","status"],"done"]
+          : ["==",["get","status"],"__none__"]
+      );
+      map.setLayoutProperty("app-house-dots","visibility","visible");
+    }else{
+      const filter=currentFilter==="all"
+        ? ["in",["get","status"],["literal",["todo","doing","done"]]]
+        : ["==",["get","status"],currentFilter];
+      map.setFilter("app-house-dots",filter);
+      map.setLayoutProperty("app-house-dots","visibility","visible");
+    }
   }
 
-  el("bulkSelectFab").classList.toggle("hidden", currentMode!=="house");
+  if(map.getLayer("app-house-labels")){
+    map.setLayoutProperty("app-house-labels","visibility",currentMode==="house"?"visible":"none");
+    if(currentMode==="house"){
+      const filter=currentFilter==="all"
+        ? ["in",["get","status"],["literal",["todo","doing","done"]]]
+        : ["==",["get","status"],currentFilter];
+      map.setFilter("app-house-labels",filter);
+    }
+  }
+
+  if(map.getLayer("app-house-hitbox")){
+    map.setLayoutProperty("app-house-hitbox","visibility",currentMode==="house"?"visible":"none");
+  }
+
+  // Legacy lagen altijd uit; hierdoor kunnen geen dubbele grijze/groene bolletjes ontstaan.
+  ["todo-houses","house-hitbox","house-mask-dots","house-status-dots"].forEach(id=>{
+    if(map.getLayer(id)) map.setLayoutProperty(id,"visibility","none");
+  });
+
+  if(map.getLayer("house-selection-rings")){
+    map.setLayoutProperty("house-selection-rings","visibility",bulkSelectMode?"visible":"none");
+  }
+
+  if(map.getLayer("app-street-segments")){
+    if(currentMode==="street"){
+      const filter=currentFilter==="all"
+        ? ["in",["get","status"],["literal",["todo","doing","done"]]]
+        : ["==",["get","status"],currentFilter];
+      map.setFilter("app-street-segments",filter);
+      map.setLayoutProperty("app-street-segments","visibility","visible");
+      map.setLayoutProperty("app-street-segments-outline","visibility","visible");
+      map.setLayoutProperty("app-street-segments-hitbox","visibility","visible");
+    }else{
+      // In Huizen alleen voortgang van straatdelen tonen; grijze delen verbergen.
+      const allowed=currentFilter==="all"
+        ? ["in",["get","status"],["literal",["doing","done"]]]
+        : (currentFilter==="todo"
+            ? ["==",["get","status"],"__none__"]
+            : ["==",["get","status"],currentFilter]);
+      map.setFilter("app-street-segments",allowed);
+      map.setLayoutProperty("app-street-segments","visibility","visible");
+      map.setLayoutProperty("app-street-segments-outline","visibility","visible");
+      map.setLayoutProperty("app-street-segments-hitbox","visibility","none");
+    }
+  }
+
+  el("bulkSelectFab").classList.toggle("hidden", currentMode!=="house" || bulkSelectMode);
 
   el("modePill").textContent=currentMode==="street"
-    ?"Straten · alleen afgeronde huizen zichtbaar"
-    :"Huizen · afgeronde straten blijven zichtbaar";
+    ?"Straten · verdeeld in stukken van ±50 meter"
+    :"Huizen · tik op een huis of selecteer meerdere";
 }
-
 
 async function searchStreet(){
   const q=el("streetSearch").value.trim();
@@ -809,6 +1206,21 @@ function identify(point,lngLat=null){
   if(lngLat && !inCurrentPlace(lngLat.lng,lngLat.lat)) return null;
 
   if(currentMode==="street"){
+    // Vanaf zoom 14 werken we met kleine straatdelen.
+    if(map.getZoom()>=14 && map.getLayer("app-street-segments-hitbox")){
+      const segs=map.queryRenderedFeatures(
+        [[point.x-14,point.y-14],[point.x+14,point.y+14]],
+        {layers:["app-street-segments-hitbox","app-street-segments"]}
+      )||[];
+      if(segs.length){
+        // Dichtstbijzijnde lijnstuk pakken.
+        const f=segs[0];
+        const item=streetSegmentItemFromFeature(f);
+        if(item) return item;
+      }
+    }
+
+    // Uitgezoomd blijft de hele-straat bediening als fallback beschikbaar.
     const fs=map.queryRenderedFeatures(
       [[point.x-10,point.y-10],[point.x+10,point.y+10]],
       {layers:["done-streets","doing-streets","todo-streets"]}
@@ -828,92 +1240,24 @@ function identify(point,lngLat=null){
     };
   }
 
-  let fs=map.queryRenderedFeatures(
-    [[point.x-24,point.y-24],[point.x+24,point.y+24]],
-    {layers:["house-status-dots","house-hitbox","todo-houses"]}
-  );
+  const fs=map.queryRenderedFeatures(
+    [[point.x-26,point.y-26],[point.x+26,point.y+26]],
+    {layers:["app-house-hitbox","app-house-dots"]}
+  )||[];
 
-  const saved=fs.find(f=>f.layer?.id==="house-status-dots" && f.properties?.id);
-  if(saved){
-    const s=states.get(saved.properties.id);
-    if(s){
-      return {
-        id:s.id,item_type:"house",place:s.place,name:s.name,
-        street_name:s.street_name,house_number:s.house_number,
-        lat:s.lat,lon:s.lon
-      };
-    }
+  if(!fs.length) return null;
+
+  // Pak het huis dat het dichtst bij het tikpunt staat.
+  let best=null,bestD=Infinity;
+  for(const f of fs){
+    const c=f.geometry?.coordinates;
+    if(!Array.isArray(c)) continue;
+    const p=map.project(c);
+    const d=Math.hypot(p.x-point.x,p.y-point.y);
+    if(d<bestD){bestD=d;best=f;}
   }
-
-  let candidate=fs.find(f=>f.layer?.id==="house-hitbox" || f.layer?.id==="todo-houses");
-
-  if(!candidate && vectorSource){
-    try{
-      const sourceFeatures=map.querySourceFeatures(vectorSource,{sourceLayer:"housenumber"})||[];
-      let best=null,bestDist=Infinity;
-      for(const f of sourceFeatures){
-        const coords=f.geometry?.coordinates;
-        if(!Array.isArray(coords) || typeof coords[0]!=="number" || typeof coords[1]!=="number") continue;
-        const p=map.project(coords);
-        const d=Math.hypot(p.x-point.x,p.y-point.y);
-        if(d<bestDist && d<=32){best=f;bestDist=d;}
-      }
-      candidate=best;
-    }catch(e){console.warn("Huisbron zoeken mislukt",e)}
-  }
-
-  if(!candidate){
-    const all=map.queryRenderedFeatures(
-      [[point.x-28,point.y-28],[point.x+28,point.y+28]]
-    )||[];
-    candidate=all.find(f=>{
-      const p=f.properties||{};
-      return p.housenumber || p.house_number || p["addr:housenumber"];
-    });
-  }
-
-  if(!candidate) return null;
-
-  const props=candidate.properties||{};
-  const num=String(
-    props.housenumber ??
-    props.house_number ??
-    props["addr:housenumber"] ??
-    props.name ??
-    "Huis"
-  );
-
-  const street=props.street ?? props["addr:street"] ?? null;
-
-  // Probeer eerst de echte featurecoördinaten. Als MapLibre broncoördinaten niet
-  // bruikbaar zijn, gebruiken we het daadwerkelijke tikpunt op de kaart.
-  let lon=null,lat=null;
-  const coords=candidate.geometry?.coordinates;
-  if(Array.isArray(coords) && Number.isFinite(Number(coords[0])) && Number.isFinite(Number(coords[1]))){
-    const cLon=Number(coords[0]), cLat=Number(coords[1]);
-    if(Math.abs(cLon)<=180 && Math.abs(cLat)<=90){
-      lon=cLon; lat=cLat;
-    }
-  }
-  if((lon===null || lat===null) && lngLat){
-    lon=Number(lngLat.lng); lat=Number(lngLat.lat);
-  }
-  if(!Number.isFinite(lon) || !Number.isFinite(lat)) return null;
-  if(!inCurrentPlace(lon,lat)) return null;
-
-  const display=street ? `${street} ${num}` : `Huis ${num}`;
-
-  return {
-    id:houseId(currentPlace,num,lon,lat),
-    item_type:"house",
-    place:currentPlace,
-    name:display,
-    street_name:street,
-    house_number:num,
-    lat:Number(lat.toFixed(6)),lon:Number(lon.toFixed(6))
-  };
+  return houseItemFromAppFeature(best);
 }
-
 
 function updateBulkSelectionVisuals(){
   const src=map.getSource("house-selection");
@@ -957,43 +1301,7 @@ function hideBulkToolbar(){
 }
 
 function featureToHouseItem(f){
-  const props=f.properties||{};
-  let lon=null,lat=null;
-  const coords=f.geometry?.coordinates;
-  if(Array.isArray(coords) && Number.isFinite(Number(coords[0])) && Number.isFinite(Number(coords[1]))){
-    lon=Number(coords[0]); lat=Number(coords[1]);
-  }
-  if(!Number.isFinite(lon)||!Number.isFinite(lat)) return null;
-
-  if(f.layer?.id==="house-status-dots" && props.id){
-    const saved=states.get(props.id);
-    if(saved){
-      return {
-        id:saved.id,item_type:"house",place:saved.place,name:saved.name,
-        street_name:saved.street_name,house_number:saved.house_number,
-        lat:Number(saved.lat),lon:Number(saved.lon)
-      };
-    }
-  }
-
-  const num=String(
-    props.housenumber ??
-    props.house_number ??
-    props["addr:housenumber"] ??
-    props.name ??
-    "Huis"
-  );
-  const street=props.street ?? props["addr:street"] ?? null;
-
-  return {
-    id:houseId(currentPlace,num,lon,lat),
-    item_type:"house",
-    place:currentPlace,
-    name:street ? `${street} ${num}` : `Huis ${num}`,
-    street_name:street,
-    house_number:num,
-    lat,lon
-  };
+  return houseItemFromAppFeature(f);
 }
 
 function beginBulkSelect(){
@@ -1049,7 +1357,7 @@ function selectHousesInBox(a,b){
   try{
     features=map.queryRenderedFeatures(
       [[minX,minY],[maxX,maxY]],
-      {layers:["house-status-dots","house-hitbox","todo-houses"]}
+      {layers:["app-house-hitbox","app-house-dots"]}
     )||[];
   }catch(e){console.warn(e)}
 
@@ -1111,6 +1419,7 @@ async function applyBulkStatus(status){
     const saved=await upsertMany(rows);
     const savedMap=new Map(saved.map(x=>[x.id,x]));
     rows.forEach(r=>states.set(r.id,savedMap.get(r.id)||r));
+    houseRenderSignature="";
     updateStatusVisuals();
     updateCounts();
     el("bulkDialog").close();
@@ -1133,7 +1442,11 @@ function openItem(item){
   el("dateInput").value=s.status_date||"";
   el("flyersInput").value=s.flyers||0;
   el("noteInput").value=s.note||"";
-  document.querySelectorAll(".statuses button").forEach(b=>b.classList.toggle("selected",b.dataset.status===selectedStatus));
+  map.on("moveend",()=>{scheduleHouseRefresh();scheduleStreetSegmentRefresh();});
+map.on("zoomend",()=>{scheduleHouseRefresh();scheduleStreetSegmentRefresh();applyModeVisibility();});
+map.on("idle",()=>{scheduleHouseRefresh();scheduleStreetSegmentRefresh();});
+
+document.querySelectorAll(".statuses button").forEach(b=>b.classList.toggle("selected",b.dataset.status===selectedStatus));
   el("itemDialog").showModal();
 }
 async function markDone(item){
@@ -1148,7 +1461,7 @@ async function markDone(item){
     status:"done",person:currentUser,status_date:today(),flyers:old.flyers||0,note:old.note||null,
     lat:item.lat??old.lat??null,lon:item.lon??old.lon??null,updated_at:new Date().toISOString()
   };
-  try{const d=await upsert(row);states.set(row.id,d||row);updateStatusVisuals();updateCounts();showToast(`${item.name} afgerond`)}
+  try{const d=await upsert(row);states.set(row.id,d||row);houseRenderSignature="";streetSegmentSignature="";updateStatusVisuals();updateCounts();showToast(`${item.name} afgerond`)}
   catch(e){console.error(e);showToast("Opslaan is niet gelukt")}
 }
 
@@ -1228,54 +1541,27 @@ canvas.addEventListener("pointerup",e=>{
 },{passive:true}));
 
 
-map.on("click","house-hitbox",e=>{
-  if(currentMode!=="house") return;
+map.on("click","app-house-hitbox",e=>{
+  if(currentMode!=="house" || bulkDrawMode) return;
   if(longFired){longFired=false;return;}
-  const f=e.features?.[0];
-  if(!f) return;
-  const coords=f.geometry?.coordinates;
-  const p=f.properties||{};
-  const num=String(p.housenumber ?? p.house_number ?? p["addr:housenumber"] ?? p.name ?? "Huis");
-  const street=p.street ?? p["addr:street"] ?? null;
+  const item=houseItemFromAppFeature(e.features?.[0]);
+  if(!item) return;
+  if(bulkSelectMode) toggleBulkItem(item);
+  else openItem(item);
+});
 
-  let lon=Array.isArray(coords) ? Number(coords[0]) : NaN;
-  let lat=Array.isArray(coords) ? Number(coords[1]) : NaN;
-  if(!Number.isFinite(lon) || !Number.isFinite(lat) || Math.abs(lon)>180 || Math.abs(lat)>90){
-    lon=Number(e.lngLat?.lng);
-    lat=Number(e.lngLat?.lat);
-  }
-  if(!Number.isFinite(lon) || !Number.isFinite(lat)) return;
 
-  const item={
-    id:houseId(currentPlace,num,lon,lat),
-    item_type:"house",
-    place:currentPlace,
-    name:street ? `${street} ${num}` : `Huis ${num}`,
-    street_name:street,
-    house_number:num,
-    lat,lon
-  };
-  if(bulkSelectMode){
-    toggleBulkItem(item);
-  }else{
-    openItem(item);
-  }
+map.on("click","app-street-segments-hitbox",e=>{
+  if(currentMode!=="street" || map.getZoom()<14) return;
+  if(longFired){longFired=false;return;}
+  const item=streetSegmentItemFromFeature(e.features?.[0]);
+  if(item) openItem(item);
 });
 
 map.on("click",e=>{
   if(longFired){longFired=false;return}
-
-  if(bulkSelectMode){
-    if(bulkDrawMode) return;
-    const previousMode=currentMode;
-    currentMode="house";
-    const item=identify(e.point,e.lngLat);
-    currentMode=previousMode;
-    if(item && item.item_type==="house") toggleBulkItem(item);
-    else showToast("Tik dichter op een huis");
-    return;
-  }
-
+  if(currentMode==="house") return; // Huizen worden door app-house-hitbox afgehandeld.
+  if(currentMode==="street" && map.getZoom()>=14) return; // Straatdelen hebben hun eigen kliklaag.
   const item=identify(e.point,e.lngLat);
   if(item)openItem(item);
 });
@@ -1303,7 +1589,7 @@ el("saveBtn").onclick=async()=>{
     updated_at:new Date().toISOString()
   };
   const btn=el("saveBtn");btn.disabled=true;btn.textContent="Opslaan…";
-  try{const d=await upsert(row);states.set(row.id,d||row);updateStatusVisuals();updateCounts();el("itemDialog").close()}
+  try{const d=await upsert(row);states.set(row.id,d||row);houseRenderSignature="";streetSegmentSignature="";updateStatusVisuals();updateCounts();el("itemDialog").close()}
   catch(e){console.error(e);showToast("Opslaan is niet gelukt")}
   finally{btn.disabled=false;btn.textContent="Opslaan"}
 };
