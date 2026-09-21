@@ -145,6 +145,23 @@ dialog::backdrop{background:rgba(26,24,35,.45)}
   font-size:12px;font-weight:850;white-space:nowrap;box-shadow:0 6px 18px rgba(0,0,0,.2)
 }
 
+
+.bulk-fab{
+  position:absolute;
+  right:12px;
+  bottom:calc(66px + env(safe-area-inset-bottom));
+  z-index:10;
+  border:1px solid var(--border);
+  background:#fff;
+  color:var(--dark);
+  border-radius:999px;
+  padding:10px 14px;
+  font-size:13px;
+  font-weight:850;
+  box-shadow:0 8px 22px rgba(74,68,115,.18);
+}
+.bulk-fab:active{transform:scale(.98)}
+
 </style>
 </head>
 <body>
@@ -171,6 +188,7 @@ dialog::backdrop{background:rgba(26,24,35,.45)}
   <div class="loader hidden" id="loader">Kaart laden</div>
   <div class="selection-box hidden" id="selectionBox"></div>
   <div class="select-mode-tip hidden" id="selectModeTip">Sleep een vak over de huizen</div>
+  <button class="bulk-fab hidden" id="bulkSelectFab" type="button">▧ Meerdere huizen</button>
   <button class="location-btn" id="locateBtn">⌖ Mijn locatie</button>
 </main>
 <div class="toast" id="toast"></div>
@@ -218,7 +236,7 @@ dialog::backdrop{background:rgba(26,24,35,.45)}
       <button class="menu-action" id="changeName">Naam wijzigen</button>
       <button class="menu-action" id="reloadBtn">Voortgang vernieuwen</button>
     </section>
-    <p class="help">De paarse stippellijn is de dorpsgrens. Alleen straten en huizen binnen die grens zijn actief. In Huizen blijven afgeronde straten groen en straten die bezig zijn oranje zichtbaar. Afgeronde huizen worden direct als groene stip opgeslagen en blijven na opnieuw openen zichtbaar. Huisnummers verschijnen automatisch wanneer u voldoende inzoomt. Houd een straat of huis ingedrukt om deze direct af te ronden; tik kort voor meer opties.</p>
+    <p class="help">De paarse stippellijn is de dorpsgrens. Alleen straten en huizen binnen die grens zijn actief. In Huizen blijven afgeronde straten groen en straten die bezig zijn oranje zichtbaar. Afgeronde huizen vervangen de grijze stip, blijven na opnieuw openen groen zichtbaar en zijn als enige huisstatus ook zichtbaar wanneer u terugschakelt naar Straten. Huisnummers verschijnen automatisch wanneer u voldoende inzoomt. Houd een straat of huis ingedrukt om deze direct af te ronden; tik kort voor meer opties.</p>
   </div>
 </dialog>
 
@@ -523,12 +541,27 @@ function setupTodoLayers(){
   if(!map.getSource("house-status")){
     map.addSource("house-status",{type:"geojson",data:{type:"FeatureCollection",features:[]}});
   }
+  if(!map.getSource("house-mask")){
+    map.addSource("house-mask",{type:"geojson",data:{type:"FeatureCollection",features:[]}});
+  }
+  safeAddLayer({
+    id:"house-mask-dots",type:"circle",source:"house-mask",minzoom:16,
+    paint:{
+      "circle-radius":["interpolate",["linear"],["zoom"],16,7,18,10,20,12],
+      "circle-color":"#d9ddd3",
+      "circle-stroke-color":"#d9ddd3",
+      "circle-stroke-width":2,
+      "circle-opacity":1
+    }
+  });
+
   safeAddLayer({
     id:"house-status-dots",type:"circle",source:"house-status",minzoom:16,
     paint:{
-      "circle-radius":["interpolate",["linear"],["zoom"],16,5,18,8,20,10],
+      "circle-radius":["interpolate",["linear"],["zoom"],16,6,18,9,20,11],
       "circle-color":["match",["get","status"],"doing",STATUS.doing,"done",STATUS.done,STATUS.todo],
-      "circle-stroke-color":"#fff","circle-stroke-width":2
+      "circle-stroke-color":"#fff","circle-stroke-width":2.5,
+      "circle-opacity":1
     }
   });
 
@@ -540,19 +573,24 @@ function updateStatusVisuals(){
   if(!mapReady) return;
   const doneNames=[],doingNames=[];
   const houseFeatures=[];
+  const maskFeatures=[];
   for(const s of states.values()){
     if(s.item_type==="street"){
       if(s.status==="done") doneNames.push(s.name);
       if(s.status==="doing") doingNames.push(s.name);
     }
     if(s.item_type==="house" && Number.isFinite(Number(s.lon)) && Number.isFinite(Number(s.lat)) && s.status!=="todo"){
-      houseFeatures.push({type:"Feature",geometry:{type:"Point",coordinates:[s.lon,s.lat]},properties:{id:s.id,status:s.status,name:s.name}});
+      const coords=[Number(s.lon),Number(s.lat)];
+      houseFeatures.push({type:"Feature",geometry:{type:"Point",coordinates:coords},properties:{id:s.id,status:s.status,name:s.name}});
+      maskFeatures.push({type:"Feature",geometry:{type:"Point",coordinates:coords},properties:{id:s.id}});
     }
   }
   if(map.getLayer("done-streets")) map.setFilter("done-streets",doneNames.length?["in",["get","name"],["literal",doneNames]]:["==",["get","name"],"__none__"]);
   if(map.getLayer("doing-streets")) map.setFilter("doing-streets",doingNames.length?["in",["get","name"],["literal",doingNames]]:["==",["get","name"],"__none__"]);
   const src=map.getSource("house-status");
   if(src) src.setData({type:"FeatureCollection",features:houseFeatures});
+  const maskSrc=map.getSource("house-mask");
+  if(maskSrc) maskSrc.setData({type:"FeatureCollection",features:maskFeatures});
 
   if(map.getLayer("todo-streets")){
     const todoHidden=[...doneNames,...doingNames];
@@ -565,8 +603,29 @@ function updateStatusVisuals(){
   if(map.getLayer("doing-streets")) map.setLayoutProperty("doing-streets","visibility",(currentFilter==="all"||currentFilter==="doing")?"visible":"none");
   if(map.getLayer("todo-houses")) map.setLayoutProperty("todo-houses","visibility",(currentMode==="house"&&(currentFilter==="all"||currentFilter==="todo"))?"visible":"none");
   if(map.getLayer("house-status-dots")){
-    const all=houseFeatures.filter(f=>currentFilter==="all"||f.properties.status===currentFilter);
+    const all=houseFeatures.filter(f=>{
+      const status=f.properties.status;
+      if(currentMode==="street"){
+        // In Straten-modus alleen afgeronde huizen tonen.
+        if(status!=="done") return false;
+        return currentFilter==="all" || currentFilter==="done";
+      }
+      return currentFilter==="all" || status===currentFilter;
+    });
     map.getSource("house-status")?.setData({type:"FeatureCollection",features:all});
+  }
+  if(map.getLayer("house-mask-dots")){
+    const visibleMask=maskFeatures.filter((f)=>{
+      const id=f.properties?.id;
+      const s=id?states.get(id):null;
+      if(!s) return false;
+      if(currentMode==="street"){
+        // Alleen een maskerpunt tonen voor afgeronde huizen, omdat alleen die groen zichtbaar zijn.
+        return s.status==="done" && (currentFilter==="all" || currentFilter==="done");
+      }
+      return currentFilter==="all" || s.status===currentFilter;
+    });
+    map.getSource("house-mask")?.setData({type:"FeatureCollection",features:visibleMask});
   }
   applyModeVisibility();
 }
@@ -595,12 +654,19 @@ function applyModeVisibility(){
   if(map.getLayer("house-hitbox")){
     map.setLayoutProperty("house-hitbox","visibility",currentMode==="house"?"visible":"none");
   }
+  // Afgeronde / actieve huizen blijven ook in Straten-modus zichtbaar.
+  // Alleen de grijze "nog te doen"-huizen zijn exclusief voor Huizen-modus.
+  if(map.getLayer("house-mask-dots")){
+    map.setLayoutProperty("house-mask-dots","visibility","visible");
+  }
   if(map.getLayer("house-status-dots")){
-    map.setLayoutProperty("house-status-dots","visibility",currentMode==="house"?"visible":"none");
+    map.setLayoutProperty("house-status-dots","visibility","visible");
   }
 
+  el("bulkSelectFab").classList.toggle("hidden", currentMode!=="house");
+
   el("modePill").textContent=currentMode==="street"
-    ?"Straten · grijs = nog te doen"
+    ?"Straten · alleen afgeronde huizen zichtbaar"
     :"Huizen · afgeronde straten blijven zichtbaar";
 }
 
@@ -779,7 +845,7 @@ function identify(point,lngLat=null){
     name:display,
     street_name:street,
     house_number:num,
-    lat,lon
+    lat:Number(lat.toFixed(6)),lon:Number(lon.toFixed(6))
   };
 }
 
@@ -1119,6 +1185,7 @@ el("locateBtn").onclick=()=>{
 };
 
 el("bulkSelectBtn").onclick=beginBulkSelect;
+el("bulkSelectFab").onclick=beginBulkSelect;
 el("closeBulk").onclick=()=>{bulkSelectedItems=[];el("bulkDialog").close()};
 el("bulkCancel").onclick=()=>{bulkSelectedItems=[];el("bulkDialog").close()};
 document.querySelectorAll("[data-bulk-status]").forEach(b=>b.onclick=()=>applyBulkStatus(b.dataset.bulkStatus));
