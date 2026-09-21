@@ -1,0 +1,874 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#635EAF">
+<title>Folderkaart Maashorst</title>
+
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.css">
+<script src="https://unpkg.com/maplibre-gl@5/dist/maplibre-gl.js"></script>
+
+<style>
+:root{
+  --purple:#6D69B4; --dark:#635EAF; --pink:#DA7FBB; --light:#E7B8DE;
+  --todo:#9AA0A6; --doing:#F0A33B; --done:#3FAE70;
+  --bg:#F8F7FA; --text:#292832; --muted:#74717F; --border:#E7E4EC;
+}
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--bg);color:var(--text);overflow:hidden}
+button,input,select,textarea{font:inherit}
+button{cursor:pointer}
+.topbar{
+  height:176px;padding:calc(10px + env(safe-area-inset-top)) 12px 10px;
+  background:rgba(250,249,252,.97);backdrop-filter:blur(14px);
+  border-bottom:1px solid var(--border);position:relative;z-index:20
+}
+.head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.brand h1{margin:0;color:var(--dark);font-size:23px;line-height:1}
+.brand span{display:block;margin-top:4px;color:var(--muted);font-size:11px}
+.menu-btn{
+  width:44px;height:44px;border:1px solid var(--border);background:#fff;color:var(--dark);
+  border-radius:14px;font-size:23px;font-weight:800
+}
+.area-row{display:flex;align-items:center;gap:10px;margin-top:10px}
+.area-row label{font-size:13px;font-weight:800;color:var(--dark)}
+.area-row select{
+  flex:1;height:44px;border:1px solid var(--border);border-radius:14px;background:#fff;
+  padding:0 12px;color:var(--text);font-size:16px
+}
+.map-wrap{position:relative;height:calc(100dvh - 176px);min-height:420px}
+#map{position:absolute;inset:0}
+.location-btn{
+  position:absolute;right:12px;bottom:calc(18px + env(safe-area-inset-bottom));z-index:10;
+  border:0;background:var(--dark);color:#fff;border-radius:999px;padding:10px 14px;
+  font-size:14px;font-weight:850;box-shadow:0 8px 22px rgba(74,68,115,.24)
+}
+.mode-pill{
+  position:absolute;left:12px;top:12px;z-index:10;background:rgba(255,255,255,.94);
+  border:1px solid var(--border);border-radius:999px;padding:7px 11px;font-size:12px;
+  font-weight:800;color:var(--dark);box-shadow:0 4px 14px rgba(60,55,90,.12)
+}
+.toast{
+  position:fixed;left:50%;bottom:calc(78px + env(safe-area-inset-bottom));z-index:100;
+  transform:translateX(-50%) translateY(12px);opacity:0;pointer-events:none;
+  background:#292832;color:#fff;border-radius:999px;padding:10px 14px;font-size:13px;
+  max-width:88%;text-align:center;transition:.2s
+}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.loader{
+  position:absolute;left:50%;top:12px;z-index:11;transform:translateX(-50%);
+  display:flex;align-items:center;gap:7px;background:rgba(255,255,255,.96);
+  border:1px solid var(--border);border-radius:999px;padding:7px 11px;
+  color:var(--dark);font-size:12px;font-weight:800
+}
+.loader::before{content:"";width:12px;height:12px;border:2px solid #ddd9ec;border-top-color:var(--dark);border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.hidden{display:none!important}
+.maplibregl-ctrl-attrib{font-size:9px!important;background:rgba(255,255,255,.76)!important}
+.maplibregl-ctrl-group{border-radius:12px!important;overflow:hidden}
+
+dialog{border:0;background:#fff;color:var(--text);box-shadow:0 18px 60px rgba(0,0,0,.23)}
+dialog::backdrop{background:rgba(26,24,35,.45)}
+#nameDialog{width:min(92%,430px);border-radius:24px;padding:0}
+.welcome{padding:24px}
+.welcome h2{margin:0;color:var(--dark);font-size:25px}
+.welcome p{color:var(--muted);line-height:1.45}
+.welcome input{width:100%;height:50px;border:1px solid var(--border);border-radius:14px;padding:0 13px;font-size:17px}
+.primary{
+  width:100%;margin-top:13px;border:0;border-radius:14px;background:var(--dark);color:#fff;
+  padding:13px 16px;font-weight:900
+}
+
+#menuDialog{width:min(92%,460px);max-height:85dvh;border-radius:24px;padding:0}
+.menu{padding:20px;overflow:auto}
+.menu-head{display:flex;justify-content:space-between;align-items:flex-start}
+.eyebrow{margin:0 0 4px;color:var(--purple);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:.07em}
+.menu h2{margin:0;color:var(--dark)}
+.close{border:0;background:#F0EEF7;color:var(--dark);width:40px;height:40px;border-radius:50%;font-size:24px}
+.section{padding:15px 0;border-bottom:1px solid var(--border)}
+.section h3{margin:0 0 10px;font-size:14px;color:#555264}
+.toggle{display:flex;border:1px solid var(--border);background:#fff;border-radius:14px;padding:4px}
+.toggle button{flex:1;border:0;background:transparent;border-radius:10px;padding:10px;color:var(--dark);font-weight:850}
+.toggle button.active{background:var(--purple);color:#fff}
+.filters{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.chip{border:1px solid var(--border);background:#fff;border-radius:12px;padding:10px;font-weight:800;color:#686574}
+.chip.active{background:#EFEEFA;border-color:#DAD6F3;color:var(--dark)}
+.counts{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.count{border:1px solid var(--border);border-radius:14px;padding:10px;text-align:center}
+.count b{display:block;color:var(--dark);font-size:20px}
+.count span{font-size:11px;color:var(--muted)}
+.menu-action{width:100%;border:1px solid var(--border);background:#fff;color:var(--dark);border-radius:13px;padding:12px 14px;text-align:left;font-weight:850;margin-top:8px}
+.help{margin:12px 0 0;color:var(--muted);font-size:12px;line-height:1.45}
+
+#itemDialog{width:min(100%,620px);border-radius:24px 24px 0 0;padding:0;margin:auto auto 0}
+.sheet{padding:18px 18px calc(18px + env(safe-area-inset-bottom))}
+.handle{width:46px;height:5px;border-radius:99px;background:#ddd;margin:0 auto 15px}
+.sheet-head{display:flex;justify-content:space-between;gap:12px}
+.sheet h2{margin:0;color:var(--dark);font-size:23px}
+.statuses{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:18px 0}
+.statuses button{border:2px solid transparent;border-radius:14px;padding:12px 6px;font-weight:850}
+.s-todo{background:#F0F1F3;color:#555}
+.s-doing{background:#FFF2DC;color:#995D00}
+.s-done{background:#E7F6EE;color:#187A48}
+.statuses button.selected{border-color:var(--purple);outline:3px solid rgba(109,105,180,.18)}
+.fields{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.fields label{font-size:13px;font-weight:750;color:#575463}
+.fields input,.fields textarea{width:100%;margin-top:5px;border:1px solid var(--border);border-radius:12px;padding:11px 12px}
+.fields textarea{min-height:80px;resize:vertical}
+.full{grid-column:1/-1}
+@media(max-width:650px){.fields{grid-template-columns:1fr}.full{grid-column:1}}
+
+.search-row{
+  display:flex;gap:8px;margin-top:8px
+}
+.search-row input{
+  flex:1;height:42px;border:1px solid var(--border);border-radius:13px;background:#fff;
+  padding:0 12px;font-size:15px;color:var(--text)
+}
+.search-row button{
+  height:42px;border:0;border-radius:13px;background:var(--purple);color:#fff;
+  padding:0 14px;font-weight:850
+}
+.search-row input:focus{outline:2px solid rgba(109,105,180,.22);border-color:var(--purple)}
+
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="head">
+    <div class="brand"><h1>Folderkaart</h1><span>Mondzorgcentrum Maashorst</span></div>
+    <button class="menu-btn" id="menuBtn" aria-label="Menu">☰</button>
+  </div>
+  <div class="area-row">
+    <label for="placeSelect">Gebied</label>
+    <select id="placeSelect">
+      <option>Uden</option><option>Volkel</option><option>Zeeland</option><option>Odiliapeel</option>
+    </select>
+  </div>
+  <div class="search-row">
+    <input id="streetSearch" type="search" placeholder="Zoek straatnaam" autocomplete="off" />
+    <button id="streetSearchBtn" type="button">Zoeken</button>
+  </div>
+</header>
+
+<main class="map-wrap">
+  <div id="map"></div>
+  <div class="mode-pill" id="modePill">Straten · grijs = nog te doen</div>
+  <div class="loader hidden" id="loader">Kaart laden</div>
+  <button class="location-btn" id="locateBtn">⌖ Mijn locatie</button>
+</main>
+<div class="toast" id="toast"></div>
+
+<dialog id="nameDialog">
+  <form method="dialog" class="welcome" id="nameForm">
+    <h2>Welkom</h2>
+    <p>Vul eerst uw naam in. Deze naam wordt opgeslagen bij straten en huizen die u afvinkt.</p>
+    <input id="nameInput" placeholder="Uw naam" autocomplete="name" required>
+    <button class="primary" type="submit">Verder naar de kaart</button>
+  </form>
+</dialog>
+
+<dialog id="menuDialog">
+  <div class="menu">
+    <div class="menu-head">
+      <div><p class="eyebrow">Instellingen</p><h2>Menu</h2></div>
+      <button class="close" id="closeMenu">×</button>
+    </div>
+    <section class="section">
+      <h3>Wat wilt u afvinken?</h3>
+      <div class="toggle">
+        <button id="streetMode" class="active">Straten</button>
+        <button id="houseMode">Huizen</button>
+      </div>
+    </section>
+    <section class="section">
+      <h3>Status tonen</h3>
+      <div class="filters">
+        <button class="chip active" data-filter="all">Alles</button>
+        <button class="chip" data-filter="todo">Nog te doen</button>
+        <button class="chip" data-filter="doing">Bezig</button>
+        <button class="chip" data-filter="done">Afgerond</button>
+      </div>
+    </section>
+    <section class="section">
+      <h3>Opgeslagen voortgang</h3>
+      <div class="counts">
+        <div class="count"><b id="doingCount">0</b><span>Bezig</span></div>
+        <div class="count"><b id="doneCount">0</b><span>Afgerond</span></div>
+      </div>
+    </section>
+    <section class="section">
+      <button class="menu-action" id="changeName">Naam wijzigen</button>
+      <button class="menu-action" id="reloadBtn">Voortgang vernieuwen</button>
+    </section>
+    <p class="help">De paarse stippellijn is de dorpsgrens. Alleen straten en huizen binnen die grens zijn actief. In Huizen blijven afgeronde straten groen en straten die bezig zijn oranje zichtbaar, zodat u overzicht houdt terwijl u per huis werkt. Huisnummers verschijnen automatisch wanneer u voldoende inzoomt. Houd een straat of huis ingedrukt om deze direct af te ronden; tik kort voor meer opties.</p>
+  </div>
+</dialog>
+
+<dialog id="itemDialog">
+  <div class="sheet">
+    <div class="handle"></div>
+    <div class="sheet-head">
+      <div><p class="eyebrow" id="itemType">Straat</p><h2 id="itemTitle"></h2></div>
+      <button class="close" id="closeItem">×</button>
+    </div>
+    <div class="statuses">
+      <button class="s-todo" data-status="todo">Nog te doen</button>
+      <button class="s-doing" data-status="doing">Bezig</button>
+      <button class="s-done" data-status="done">Afgerond</button>
+    </div>
+    <div class="fields">
+      <label>Door<input id="personInput"></label>
+      <label>Datum<input id="dateInput" type="date"></label>
+      <label>Aantal folders<input id="flyersInput" type="number" min="0" value="0"></label>
+      <label class="full">Notitie<textarea id="noteInput"></textarea></label>
+    </div>
+    <button class="primary" id="saveBtn">Opslaan</button>
+  </div>
+</dialog>
+
+<script>
+const CFG={
+  url:"https://oenuuwxwinwxrligaehe.supabase.co",
+  key:"sb_publishable_8j4C1_7ZRM8tVIept8yphg_E6dCJpQ-",
+  style:"https://tiles.openfreemap.org/styles/liberty",
+  boundaryUrl:"https://oenuuwxwinwxrligaehe.supabase.co/functions/v1/place-boundary",
+  geocodeUrl:"https://nominatim.openstreetmap.org/search"
+};
+const PLACES={
+  Uden:{center:[5.6197,51.6606],bbox:[5.535,51.610,5.720,51.715]},
+  Volkel:{center:[5.6544,51.6428],bbox:[5.610,51.605,5.735,51.680]},
+  Zeeland:{center:[5.6767,51.6976],bbox:[5.620,51.655,5.755,51.745]},
+  Odiliapeel:{center:[5.7057,51.6438],bbox:[5.665,51.600,5.790,51.690]}
+};
+const STATUS={todo:"#9AA0A6",doing:"#F0A33B",done:"#3FAE70"};
+const el=id=>document.getElementById(id);
+const dbHeaders={apikey:CFG.key,Authorization:"Bearer "+CFG.key,"Content-Type":"application/json",Prefer:"resolution=merge-duplicates,return=representation"};
+
+let currentUser=localStorage.getItem("folderkaart_user")||"";
+let currentPlace="Uden";
+let currentMode="street";
+let currentFilter="all";
+let selectedStatus="todo";
+let selectedItem=null;
+let states=new Map();
+let vectorSource=null;
+let mapReady=false;
+let toastTimer=null;
+let currentBoundary=null;
+const boundaryCache=new Map();
+
+function slug(s){return String(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,120)}
+function streetId(place,name){return `street:${slug(place)}:${slug(name)}`}
+function houseId(place,num,lon,lat){return `house:${slug(place)}:${slug(num)}:${lat.toFixed(5)}:${lon.toFixed(5)}`}
+function stateFor(id){return states.get(id)||{status:"todo",person:"",status_date:null,flyers:0,note:""}}
+function showToast(msg){el("toast").textContent=msg;el("toast").classList.add("show");clearTimeout(toastTimer);toastTimer=setTimeout(()=>el("toast").classList.remove("show"),1800)}
+function setLoading(on,text="Kaart laden"){el("loader").textContent=text;el("loader").classList.toggle("hidden",!on)}
+function today(){return new Date().toISOString().slice(0,10)}
+
+
+function coordInsideRing(lon,lat,ring){
+  let inside=false;
+  for(let i=0,j=ring.length-1;i<ring.length;j=i++){
+    const xi=ring[i][0], yi=ring[i][1];
+    const xj=ring[j][0], yj=ring[j][1];
+    const intersects=((yi>lat)!=(yj>lat)) && (lon < (xj-xi)*(lat-yi)/((yj-yi)||1e-12)+xi);
+    if(intersects) inside=!inside;
+  }
+  return inside;
+}
+function pointInPolygonCoords(lon,lat,poly){
+  if(!poly?.length || !coordInsideRing(lon,lat,poly[0])) return false;
+  for(let i=1;i<poly.length;i++) if(coordInsideRing(lon,lat,poly[i])) return false;
+  return true;
+}
+function pointInBoundary(lon,lat,geometry=currentBoundary){
+  if(!geometry) return inCurrentPlace(lon,lat);
+  if(geometry.type==="Polygon") return pointInPolygonCoords(lon,lat,geometry.coordinates);
+  if(geometry.type==="MultiPolygon") return geometry.coordinates.some(poly=>pointInPolygonCoords(lon,lat,poly));
+  return false;
+}
+function walkCoords(coords,fn){
+  if(!Array.isArray(coords)) return;
+  if(typeof coords[0]==="number" && typeof coords[1]==="number"){fn(coords);return;}
+  coords.forEach(c=>walkCoords(c,fn));
+}
+function geometryBounds(geometry){
+  let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+  walkCoords(geometry?.coordinates,c=>{minX=Math.min(minX,c[0]);minY=Math.min(minY,c[1]);maxX=Math.max(maxX,c[0]);maxY=Math.max(maxY,c[1]);});
+  return Number.isFinite(minX)?[[minX,minY],[maxX,maxY]]:null;
+}
+function maskFromBoundary(geometry){
+  const outer=[[-180,-85],[180,-85],[180,85],[-180,85],[-180,-85]];
+  const holes=[];
+  if(geometry?.type==="Polygon"){
+    if(geometry.coordinates?.[0]) holes.push(geometry.coordinates[0].slice().reverse());
+  }else if(geometry?.type==="MultiPolygon"){
+    geometry.coordinates?.forEach(poly=>{if(poly?.[0]) holes.push(poly[0].slice().reverse())});
+  }
+  return {type:"Feature",properties:{},geometry:{type:"Polygon",coordinates:[outer,...holes]}};
+}
+function boundaryFeature(geometry){
+  return {type:"Feature",properties:{},geometry};
+}
+async function loadBoundary(place,fit=true){
+  setLoading(true,"Dorpsgrens laden");
+  try{
+    let geometry=boundaryCache.get(place);
+    if(!geometry){
+      const cached=await fetch(`${CFG.url}/rest/v1/place_boundaries?place=eq.${encodeURIComponent(place)}&select=geometry`,{headers:dbHeaders});
+      if(cached.ok){
+        const rows=await cached.json();
+        if(rows?.[0]?.geometry) geometry=rows[0].geometry;
+      }
+    }
+    if(!geometry){
+      const r=await fetch(`${CFG.boundaryUrl}?place=${encodeURIComponent(place)}`,{headers:{apikey:CFG.key}});
+      if(!r.ok) throw new Error("Boundary "+r.status);
+      const data=await r.json();
+      geometry=data.geometry;
+    }
+    if(!geometry) throw new Error("Geen grens ontvangen");
+    boundaryCache.set(place,geometry);
+    currentBoundary=geometry;
+
+    if(map.getSource("place-boundary")){
+      map.getSource("place-boundary").setData(boundaryFeature(geometry));
+      map.getSource("outside-mask").setData(maskFromBoundary(geometry));
+    }
+    const b=geometryBounds(geometry);
+    if(fit && b) map.fitBounds(b,{padding:32,duration:500,maxZoom:14.8});
+    return geometry;
+  }catch(e){
+    console.warn(e);
+    currentBoundary=null;
+    const p=PLACES[place];
+    if(fit) map.fitBounds([[p.bbox[0],p.bbox[1]],[p.bbox[2],p.bbox[3]]],{padding:35,duration:500});
+    showToast("Exacte dorpsgrens kon niet worden geladen");
+    return null;
+  }finally{
+    setLoading(false);
+  }
+}
+
+async function loadStates(){
+  try{
+    const r=await fetch(`${CFG.url}/rest/v1/distribution_items?select=*&place=eq.${encodeURIComponent(currentPlace)}`,{headers:dbHeaders});
+    if(!r.ok) throw new Error("DB "+r.status);
+    const data=await r.json();
+    states=new Map((data||[]).map(x=>[x.id,x]));
+    updateStatusVisuals();
+    updateCounts();
+  }catch(e){console.warn(e);showToast("Voortgang kon niet worden geladen")}
+}
+async function upsert(row){
+  const r=await fetch(`${CFG.url}/rest/v1/distribution_items?on_conflict=id`,{method:"POST",headers:dbHeaders,body:JSON.stringify(row)});
+  if(!r.ok) throw new Error(await r.text());
+  const d=await r.json(); return Array.isArray(d)?d[0]:d;
+}
+
+const map=new maplibregl.Map({
+  container:"map",style:CFG.style,center:PLACES.Uden.center,zoom:13,
+  attributionControl:true
+});
+map.addControl(new maplibregl.NavigationControl({showCompass:false}),"bottom-left");
+
+map.on("load",()=>{
+  mapReady=true;
+  discoverVectorSource();
+  setupTodoLayers();
+  setPlace(currentPlace,true);
+  loadStates();
+  setLoading(false);
+});
+map.on("error",e=>console.warn("Map error",e?.error||e));
+
+function discoverVectorSource(){
+  const sources=map.getStyle().sources||{};
+  vectorSource=Object.keys(sources).find(k=>sources[k].type==="vector")||null;
+}
+function safeAddLayer(def,before){
+  if(map.getLayer(def.id)) return;
+  try{map.addLayer(def,before)}catch(e){console.warn(def.id,e)}
+}
+function setupTodoLayers(){
+  if(!vectorSource) return;
+
+  if(!map.getSource("place-boundary")) map.addSource("place-boundary",{type:"geojson",data:{type:"FeatureCollection",features:[]}});
+  if(!map.getSource("outside-mask")) map.addSource("outside-mask",{type:"geojson",data:{type:"FeatureCollection",features:[]}});
+
+  safeAddLayer({
+    id:"outside-mask-fill",type:"fill",source:"outside-mask",
+    paint:{"fill-color":"#F8F7FA","fill-opacity":0.62}
+  });
+  safeAddLayer({
+    id:"place-boundary-fill",type:"fill",source:"place-boundary",
+    paint:{"fill-color":"#6D69B4","fill-opacity":0.035}
+  });
+  safeAddLayer({
+    id:"place-boundary-line",type:"line",source:"place-boundary",
+    paint:{"line-color":"#635EAF","line-width":3,"line-opacity":0.9,"line-dasharray":[2,1.5]}
+  });
+
+  safeAddLayer({
+    id:"todo-streets",type:"line",source:vectorSource,"source-layer":"transportation_name",
+    minzoom:12,
+    filter:["has","name"],
+    paint:{
+      "line-color":STATUS.todo,
+      "line-width":["interpolate",["linear"],["zoom"],12,2,16,5,19,8],
+      "line-opacity":0.62
+    }
+  });
+
+  safeAddLayer({
+    id:"doing-streets",type:"line",source:vectorSource,"source-layer":"transportation_name",
+    minzoom:12,filter:["==",["get","name"],"__none__"],
+    paint:{
+      "line-color":STATUS.doing,
+      "line-width":["interpolate",["linear"],["zoom"],12,3,16,6,19,9],
+      "line-opacity":0.95
+    }
+  });
+  safeAddLayer({
+    id:"done-streets",type:"line",source:vectorSource,"source-layer":"transportation_name",
+    minzoom:12,filter:["==",["get","name"],"__none__"],
+    paint:{
+      "line-color":STATUS.done,
+      "line-width":["interpolate",["linear"],["zoom"],12,3,16,6,19,9],
+      "line-opacity":0.95
+    }
+  });
+
+  safeAddLayer({
+    id:"todo-houses",type:"circle",source:vectorSource,"source-layer":"housenumber",
+    minzoom:16,
+    paint:{
+      "circle-radius":["interpolate",["linear"],["zoom"],16,4,18,7,20,9],
+      "circle-color":STATUS.todo,
+      "circle-stroke-color":"#fff","circle-stroke-width":1.5,"circle-opacity":0.9
+    }
+  });
+
+  safeAddLayer({
+    id:"house-hitbox",type:"circle",source:vectorSource,"source-layer":"housenumber",
+    minzoom:16,
+    paint:{
+      "circle-radius":["interpolate",["linear"],["zoom"],16,14,18,18,20,22],
+      "circle-color":"#000000",
+      "circle-opacity":0.001,
+      "circle-stroke-opacity":0
+    }
+  });
+
+  if(!map.getSource("house-status")){
+    map.addSource("house-status",{type:"geojson",data:{type:"FeatureCollection",features:[]}});
+  }
+  safeAddLayer({
+    id:"house-status-dots",type:"circle",source:"house-status",minzoom:16,
+    paint:{
+      "circle-radius":["interpolate",["linear"],["zoom"],16,5,18,8,20,10],
+      "circle-color":["match",["get","status"],"doing",STATUS.doing,"done",STATUS.done,STATUS.todo],
+      "circle-stroke-color":"#fff","circle-stroke-width":2
+    }
+  });
+
+  applyModeVisibility();
+  updateStatusVisuals();
+}
+
+function updateStatusVisuals(){
+  if(!mapReady) return;
+  const doneNames=[],doingNames=[];
+  const houseFeatures=[];
+  for(const s of states.values()){
+    if(s.item_type==="street"){
+      if(s.status==="done") doneNames.push(s.name);
+      if(s.status==="doing") doingNames.push(s.name);
+    }
+    if(s.item_type==="house" && Number.isFinite(s.lon) && Number.isFinite(s.lat) && s.status!=="todo"){
+      houseFeatures.push({type:"Feature",geometry:{type:"Point",coordinates:[s.lon,s.lat]},properties:{id:s.id,status:s.status,name:s.name}});
+    }
+  }
+  if(map.getLayer("done-streets")) map.setFilter("done-streets",doneNames.length?["in",["get","name"],["literal",doneNames]]:["==",["get","name"],"__none__"]);
+  if(map.getLayer("doing-streets")) map.setFilter("doing-streets",doingNames.length?["in",["get","name"],["literal",doingNames]]:["==",["get","name"],"__none__"]);
+  const src=map.getSource("house-status");
+  if(src) src.setData({type:"FeatureCollection",features:houseFeatures});
+
+  if(map.getLayer("todo-streets")){
+    const todoHidden=[...doneNames,...doingNames];
+    map.setFilter("todo-streets",
+      currentFilter==="done"||currentFilter==="doing" ? ["==",["get","name"],"__none__"] :
+      todoHidden.length ? ["all",["has","name"],["!",["in",["get","name"],["literal",todoHidden]]]] : ["has","name"]
+    );
+  }
+  if(map.getLayer("done-streets")) map.setLayoutProperty("done-streets","visibility",(currentFilter==="all"||currentFilter==="done")?"visible":"none");
+  if(map.getLayer("doing-streets")) map.setLayoutProperty("doing-streets","visibility",(currentFilter==="all"||currentFilter==="doing")?"visible":"none");
+  if(map.getLayer("todo-houses")) map.setLayoutProperty("todo-houses","visibility",(currentMode==="house"&&(currentFilter==="all"||currentFilter==="todo"))?"visible":"none");
+  if(map.getLayer("house-status-dots")){
+    const all=houseFeatures.filter(f=>currentFilter==="all"||f.properties.status===currentFilter);
+    map.getSource("house-status")?.setData({type:"FeatureCollection",features:all});
+  }
+  applyModeVisibility();
+}
+function applyModeVisibility(){
+  if(map.getLayer("todo-streets")){
+    map.setLayoutProperty("todo-streets","visibility",currentMode==="street"?"visible":"none");
+  }
+
+  // Afgevinkte/actieve straten blijven ook zichtbaar in Huizen-modus,
+  // zodat je tijdens het huis-voor-huis werken ziet welke straten al gedaan zijn.
+  if(map.getLayer("doing-streets")){
+    const showDoing=(currentFilter==="all"||currentFilter==="doing");
+    map.setLayoutProperty("doing-streets","visibility",showDoing?"visible":"none");
+  }
+  if(map.getLayer("done-streets")){
+    const showDone=(currentFilter==="all"||currentFilter==="done");
+    map.setLayoutProperty("done-streets","visibility",showDone?"visible":"none");
+  }
+
+  if(map.getLayer("todo-houses")){
+    map.setLayoutProperty(
+      "todo-houses","visibility",
+      currentMode==="house"&&(currentFilter==="all"||currentFilter==="todo")?"visible":"none"
+    );
+  }
+  if(map.getLayer("house-hitbox")){
+    map.setLayoutProperty("house-hitbox","visibility",currentMode==="house"?"visible":"none");
+  }
+  if(map.getLayer("house-status-dots")){
+    map.setLayoutProperty("house-status-dots","visibility",currentMode==="house"?"visible":"none");
+  }
+
+  el("modePill").textContent=currentMode==="street"
+    ?"Straten · grijs = nog te doen"
+    :"Huizen · afgeronde straten blijven zichtbaar";
+}
+
+
+async function searchStreet(){
+  const q=el("streetSearch").value.trim();
+  if(!q){showToast("Vul een straatnaam in");return;}
+
+  const btn=el("streetSearchBtn");
+  btn.disabled=true;
+  btn.textContent="Zoeken…";
+
+  try{
+    const params=new URLSearchParams({
+      q:`${q}, ${currentPlace}, Nederland`,
+      format:"jsonv2",
+      addressdetails:"1",
+      limit:"6",
+      countrycodes:"nl"
+    });
+
+    const r=await fetch(`${CFG.geocodeUrl}?${params.toString()}`,{
+      headers:{"Accept":"application/json"}
+    });
+    if(!r.ok) throw new Error("Zoeken mislukt");
+
+    const results=await r.json();
+    const candidates=(results||[]).filter(x=>{
+      const a=x.address||{};
+      const name=(a.road||a.pedestrian||a.residential||x.display_name||"").toLowerCase();
+      const placeText=(a.city||a.town||a.village||a.hamlet||x.display_name||"").toLowerCase();
+      return name.includes(q.toLowerCase()) && (
+        placeText.includes(currentPlace.toLowerCase()) || 
+        (Number(x.lon)>=PLACES[currentPlace].bbox[0] && Number(x.lon)<=PLACES[currentPlace].bbox[2] &&
+         Number(x.lat)>=PLACES[currentPlace].bbox[1] && Number(x.lat)<=PLACES[currentPlace].bbox[3])
+      );
+    });
+
+    const hit=candidates[0];
+    if(!hit){
+      showToast(`Straat niet gevonden in ${currentPlace}`);
+      return;
+    }
+
+    const lon=Number(hit.lon),lat=Number(hit.lat);
+    if(currentBoundary && !pointInBoundary(lon,lat,currentBoundary)){
+      showToast(`Deze straat ligt buiten de dorpsgrens van ${currentPlace}`);
+      return;
+    }
+
+    map.flyTo({center:[lon,lat],zoom:17.5,duration:700});
+    showToast("Straat gevonden");
+  }catch(e){
+    console.error(e);
+    showToast("Straat zoeken is niet gelukt");
+  }finally{
+    btn.disabled=false;
+    btn.textContent="Zoeken";
+  }
+}
+
+async function setPlace(place,fit=true){
+  currentPlace=place; el("placeSelect").value=place;
+  const p=PLACES[place];
+  // Ruime veiligheidsgrens om pannen buiten het dorp te voorkomen.
+  map.setMaxBounds([[p.bbox[0],p.bbox[1]],[p.bbox[2],p.bbox[3]]]);
+  await loadBoundary(place,fit);
+  await loadStates();
+}
+function inCurrentPlace(lon,lat){
+  if(currentBoundary) return pointInBoundary(lon,lat,currentBoundary);
+  const b=PLACES[currentPlace].bbox; return lon>=b[0]&&lon<=b[2]&&lat>=b[1]&&lat<=b[3];
+}
+function identify(point,lngLat=null){
+  if(lngLat && !inCurrentPlace(lngLat.lng,lngLat.lat)) return null;
+
+  if(currentMode==="street"){
+    const fs=map.queryRenderedFeatures(
+      [[point.x-10,point.y-10],[point.x+10,point.y+10]],
+      {layers:["done-streets","doing-streets","todo-streets"]}
+    );
+    const f=fs.find(x=>x.properties?.name);
+    if(!f) return null;
+    const name=f.properties.name;
+    return {
+      id:streetId(currentPlace,name),
+      item_type:"street",
+      place:currentPlace,
+      name,
+      street_name:name,
+      house_number:null,
+      lat:null,
+      lon:null
+    };
+  }
+
+  // 1. Probeer eerst onze eigen zichtbare/ruime huislagen.
+  let fs=map.queryRenderedFeatures(
+    [[point.x-24,point.y-24],[point.x+24,point.y+24]],
+    {layers:["house-status-dots","house-hitbox","todo-houses"]}
+  );
+
+  // Reeds opgeslagen huis.
+  const saved=fs.find(f=>f.layer?.id==="house-status-dots" && f.properties?.id);
+  if(saved){
+    const s=states.get(saved.properties.id);
+    if(s){
+      return {
+        id:s.id,item_type:"house",place:s.place,name:s.name,
+        street_name:s.street_name,house_number:s.house_number,
+        lat:s.lat,lon:s.lon
+      };
+    }
+  }
+
+  // Nieuw huis uit de vectorlaag.
+  let candidate=fs.find(f=>f.layer?.id==="house-hitbox" || f.layer?.id==="todo-houses");
+
+  // 2. Fallback: zoek direct in de vectorbron naar het dichtstbijzijnde huisnummer.
+  if(!candidate && vectorSource){
+    try{
+      const sourceFeatures=map.querySourceFeatures(vectorSource,{sourceLayer:"housenumber"})||[];
+      let best=null,bestDist=Infinity;
+      for(const f of sourceFeatures){
+        const coords=f.geometry?.coordinates;
+        if(!Array.isArray(coords) || typeof coords[0]!=="number") continue;
+        const p=map.project(coords);
+        const d=Math.hypot(p.x-point.x,p.y-point.y);
+        if(d<bestDist && d<=32){best=f;bestDist=d;}
+      }
+      candidate=best;
+    }catch(e){console.warn("Huisbron zoeken mislukt",e)}
+  }
+
+  // 3. Laatste fallback: kijk naar alle gerenderde features rond het tikpunt
+  // en zoek iets met een huisnummer-eigenschap.
+  if(!candidate){
+    const all=map.queryRenderedFeatures(
+      [[point.x-28,point.y-28],[point.x+28,point.y+28]]
+    )||[];
+    candidate=all.find(f=>{
+      const p=f.properties||{};
+      return p.housenumber || p.house_number || p["addr:housenumber"];
+    });
+  }
+
+  if(!candidate) return null;
+
+  const coords=candidate.geometry?.coordinates;
+  if(!Array.isArray(coords) || typeof coords[0]!=="number") return null;
+
+  const lon=Number(coords[0]),lat=Number(coords[1]);
+  if(!Number.isFinite(lon)||!Number.isFinite(lat)) return null;
+  if(!inCurrentPlace(lon,lat)) return null;
+
+  const props=candidate.properties||{};
+  const num=String(
+    props.housenumber ??
+    props.house_number ??
+    props["addr:housenumber"] ??
+    props.name ??
+    "Huis"
+  );
+
+  const street=props.street ?? props["addr:street"] ?? null;
+  const display=street ? `${street} ${num}` : `Huis ${num}`;
+
+  return {
+    id:houseId(currentPlace,num,lon,lat),
+    item_type:"house",
+    place:currentPlace,
+    name:display,
+    street_name:street,
+    house_number:num,
+    lat,lon
+  };
+}
+function openItem(item){
+  selectedItem=item; const s=stateFor(item.id); selectedStatus=s.status||"todo";
+  el("itemType").textContent=item.item_type==="street" ? `${item.place} · Straat` : `${item.place} · Huis`;
+  el("itemTitle").textContent=item.name;
+  el("personInput").value=s.person||currentUser||"";
+  el("dateInput").value=s.status_date||"";
+  el("flyersInput").value=s.flyers||0;
+  el("noteInput").value=s.note||"";
+  document.querySelectorAll(".statuses button").forEach(b=>b.classList.toggle("selected",b.dataset.status===selectedStatus));
+  el("itemDialog").showModal();
+}
+async function markDone(item){
+  const old=stateFor(item.id);
+  const row={
+    id:item.id,item_type:item.item_type,place:item.place,name:item.name,
+    street_name:item.street_name,house_number:item.house_number,
+    status:"done",person:currentUser,status_date:today(),flyers:old.flyers||0,note:old.note||null,
+    lat:item.lat??old.lat??null,lon:item.lon??old.lon??null,updated_at:new Date().toISOString()
+  };
+  try{const d=await upsert(row);states.set(row.id,d||row);updateStatusVisuals();updateCounts();showToast(`${item.name} afgerond`)}
+  catch(e){console.error(e);showToast("Opslaan is niet gelukt")}
+}
+
+let pressTimer=null,startPoint=null,longFired=false;
+const canvas=map.getCanvasContainer();
+canvas.addEventListener("pointerdown",e=>{
+  if(e.pointerType==="mouse"&&e.button!==0)return;
+  longFired=false;startPoint={x:e.clientX,y:e.clientY};
+  clearTimeout(pressTimer);
+  pressTimer=setTimeout(()=>{
+    longFired=true;
+    const rect=canvas.getBoundingClientRect();
+    const p={x:e.clientX-rect.left,y:e.clientY-rect.top};
+    const ll=map.unproject([p.x,p.y]);
+    const item=identify(p,ll);
+    if(item){if(navigator.vibrate)navigator.vibrate(35);markDone(item)}
+    else showToast(currentMode==="street"?"Tik dichter op een straat":"Tik dichter op het huisnummer of zoom verder in");
+  },700);
+},{passive:true});
+canvas.addEventListener("pointermove",e=>{
+  if(startPoint&&Math.hypot(e.clientX-startPoint.x,e.clientY-startPoint.y)>12){clearTimeout(pressTimer);startPoint=null}
+},{passive:true});
+["pointerup","pointercancel","pointerleave"].forEach(t=>canvas.addEventListener(t,()=>{clearTimeout(pressTimer);startPoint=null},{passive:true}));
+
+
+map.on("click","house-hitbox",e=>{
+  if(currentMode!=="house") return;
+  if(longFired){longFired=false;return;}
+  const f=e.features?.[0];
+  if(!f) return;
+  const coords=f.geometry?.coordinates;
+  if(!Array.isArray(coords)) return;
+  const p=f.properties||{};
+  const num=String(p.housenumber ?? p.house_number ?? p["addr:housenumber"] ?? p.name ?? "Huis");
+  const street=p.street ?? p["addr:street"] ?? null;
+  const item={
+    id:houseId(currentPlace,num,Number(coords[0]),Number(coords[1])),
+    item_type:"house",
+    place:currentPlace,
+    name:street ? `${street} ${num}` : `Huis ${num}`,
+    street_name:street,
+    house_number:num,
+    lat:Number(coords[1]),
+    lon:Number(coords[0])
+  };
+  openItem(item);
+});
+
+map.on("click",e=>{
+  if(longFired){longFired=false;return}
+  const item=identify(e.point,e.lngLat);
+  if(item)openItem(item);
+});
+
+document.querySelectorAll(".statuses button").forEach(b=>b.onclick=()=>{
+  selectedStatus=b.dataset.status;
+  document.querySelectorAll(".statuses button").forEach(x=>x.classList.toggle("selected",x===b));
+  if(selectedStatus!=="todo"){
+    if(!el("personInput").value)el("personInput").value=currentUser;
+    if(!el("dateInput").value)el("dateInput").value=today();
+  }
+});
+el("saveBtn").onclick=async()=>{
+  if(!selectedItem)return;
+  const old=stateFor(selectedItem.id);
+  const row={
+    id:selectedItem.id,item_type:selectedItem.item_type,place:selectedItem.place,name:selectedItem.name,
+    street_name:selectedItem.street_name,house_number:selectedItem.house_number,
+    status:selectedStatus,
+    person:selectedStatus==="todo"?null:(el("personInput").value.trim()||currentUser||null),
+    status_date:selectedStatus==="todo"?null:(el("dateInput").value||today()),
+    flyers:Math.max(0,parseInt(el("flyersInput").value||"0",10)),
+    note:el("noteInput").value.trim()||null,
+    lat:selectedItem.lat??old.lat??null,lon:selectedItem.lon??old.lon??null,
+    updated_at:new Date().toISOString()
+  };
+  const btn=el("saveBtn");btn.disabled=true;btn.textContent="Opslaan…";
+  try{const d=await upsert(row);states.set(row.id,d||row);updateStatusVisuals();updateCounts();el("itemDialog").close()}
+  catch(e){console.error(e);showToast("Opslaan is niet gelukt")}
+  finally{btn.disabled=false;btn.textContent="Opslaan"}
+};
+
+function updateCounts(){
+  let doing=0,done=0;
+  for(const s of states.values()){if(s.status==="doing")doing++;if(s.status==="done")done++}
+  el("doingCount").textContent=doing;el("doneCount").textContent=done;
+}
+
+el("streetSearchBtn").onclick=searchStreet;
+el("streetSearch").addEventListener("keydown",e=>{
+  if(e.key==="Enter"){e.preventDefault();searchStreet();}
+});
+el("placeSelect").onchange=e=>{el("streetSearch").value="";setPlace(e.target.value,true)};
+el("locateBtn").onclick=()=>{
+  if(!navigator.geolocation){showToast("Locatie is niet beschikbaar");return}
+  el("locateBtn").textContent="Zoeken…";
+  navigator.geolocation.getCurrentPosition(pos=>{
+    const lon=pos.coords.longitude,lat=pos.coords.latitude;
+    let best=currentPlace,dist=Infinity;
+    for(const [name,p] of Object.entries(PLACES)){
+      const d=(p.center[0]-lon)**2+(p.center[1]-lat)**2;if(d<dist){dist=d;best=name}
+    }
+    setPlace(best,false).then(()=>{
+      if(inCurrentPlace(lon,lat)) map.flyTo({center:[lon,lat],zoom:18});
+      else showToast("Uw locatie ligt buiten de gekozen dorpsgrens");
+    });
+    el("locateBtn").textContent="⌖ Mijn locatie";
+  },()=>{showToast("Locatie kon niet worden opgehaald");el("locateBtn").textContent="⌖ Mijn locatie"},{enableHighAccuracy:true,timeout:10000,maximumAge:30000});
+};
+
+el("menuBtn").onclick=()=>el("menuDialog").showModal();
+el("closeMenu").onclick=()=>el("menuDialog").close();
+el("closeItem").onclick=()=>el("itemDialog").close();
+el("streetMode").onclick=()=>{currentMode="street";el("streetMode").classList.add("active");el("houseMode").classList.remove("active");applyModeVisibility();el("menuDialog").close()};
+el("houseMode").onclick=()=>{currentMode="house";el("houseMode").classList.add("active");el("streetMode").classList.remove("active");applyModeVisibility();el("menuDialog").close();if(map.getZoom()<16)map.easeTo({zoom:17})};
+document.querySelectorAll(".chip").forEach(c=>c.onclick=()=>{
+  currentFilter=c.dataset.filter;document.querySelectorAll(".chip").forEach(x=>x.classList.toggle("active",x===c));updateStatusVisuals()
+});
+el("reloadBtn").onclick=()=>{loadStates();el("menuDialog").close()};
+el("changeName").onclick=()=>{el("menuDialog").close();el("nameInput").value=currentUser;el("nameDialog").showModal()};
+el("nameForm").onsubmit=e=>{
+  const n=el("nameInput").value.trim();if(!n){e.preventDefault();return}
+  currentUser=n;localStorage.setItem("folderkaart_user",n)
+};
+
+window.addEventListener("load",()=>{
+  el("nameInput").value=currentUser;
+  el("nameDialog").showModal();
+});
+</script>
+</body>
+</html>
