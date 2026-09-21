@@ -286,7 +286,7 @@ dialog::backdrop{background:rgba(26,24,35,.45)}
       <button class="menu-action" id="changeName">Naam wijzigen</button>
       <button class="menu-action" id="reloadBtn">Voortgang vernieuwen</button>
     </section>
-    <p class="help">De paarse stippellijn is de dorpsgrens. Alleen straten en huizen binnen die grens zijn actief. In Huizen blijven afgeronde straten groen en straten die bezig zijn oranje zichtbaar. Afgeronde huizen vervangen de grijze stip, blijven na opnieuw openen groen zichtbaar en zijn als enige huisstatus ook zichtbaar wanneer u terugschakelt naar Straten. Huisnummers verschijnen automatisch wanneer u voldoende inzoomt. Houd een straat of huis ingedrukt om deze direct af te ronden; tik kort voor meer opties. In Huizen kunt u via “Selecteer huizen” losse huizen aantikken of met “Vak” meerdere huizen tegelijk selecteren.</p>
+    <p class="help">De paarse stippellijn is de dorpsgrens. In Straten wordt de kaart vanaf voldoende inzoomen verdeeld in secties van ongeveer 25 meter. Tik op een sectie om deze op Nog te doen, Bezig of Afgerond te zetten. Een fout afgevinkt deel kunt u altijd opnieuw openen en terugzetten. In Huizen blijven afgeronde straten zichtbaar; via “Selecteer huizen” kunt u losse huizen aantikken of met “Vak” meerdere huizen tegelijk selecteren. Houd een straatdeel of huis ingedrukt om het direct af te ronden.</p>
   </div>
 </dialog>
 
@@ -333,6 +333,7 @@ dialog::backdrop{background:rgba(26,24,35,.45)}
       <label class="full">Notitie<textarea id="noteInput"></textarea></label>
     </div>
     <button class="primary" id="saveBtn">Opslaan</button>
+    <button class="menu-action hidden" id="resetItemBtn" type="button">Terugzetten naar nog te doen</button>
   </div>
 </dialog>
 
@@ -370,6 +371,9 @@ let bulkSelectMode=false;
 let bulkDrawMode=false;
 let bulkSelectedItems=[];
 let bulkStart=null;
+let streetSegmentSignature="";
+let streetSegmentRefreshTimer=null;
+const STREET_SEGMENT_METERS=25;
 
 function slug(s){return String(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,120)}
 function streetId(place,name){return `street:${slug(place)}:${slug(name)}`}
@@ -510,6 +514,9 @@ map.on("load",()=>{
   setLoading(false);
 });
 map.on("error",e=>console.warn("Map error",e?.error||e));
+map.on("moveend",scheduleStreetSegmentRefresh);
+map.on("zoomend",()=>{scheduleStreetSegmentRefresh();applyModeVisibility()});
+map.on("idle",scheduleStreetSegmentRefresh);
 
 function discoverVectorSource(){
   const sources=map.getStyle().sources||{};
@@ -536,6 +543,27 @@ function setupTodoLayers(){
   safeAddLayer({
     id:"place-boundary-line",type:"line",source:"place-boundary",
     paint:{"line-color":"#635EAF","line-width":3,"line-opacity":0.9,"line-dasharray":[2,1.5]}
+  });
+
+  if(!map.getSource("street-segments")){
+    map.addSource("street-segments",{type:"geojson",data:{type:"FeatureCollection",features:[]}});
+  }
+
+  safeAddLayer({
+    id:"street-segments-line",type:"line",source:"street-segments",minzoom:14,
+    paint:{
+      "line-color":["match",["get","status"],"doing",STATUS.doing,"done",STATUS.done,STATUS.todo],
+      "line-width":["interpolate",["linear"],["zoom"],14,4,16,6,19,8],
+      "line-opacity":0.98
+    }
+  });
+  safeAddLayer({
+    id:"street-segments-hitbox",type:"line",source:"street-segments",minzoom:14,
+    paint:{
+      "line-color":"#000000",
+      "line-width":["interpolate",["linear"],["zoom"],14,18,16,24,19,30],
+      "line-opacity":0.001
+    }
   });
 
   safeAddLayer({
@@ -632,6 +660,93 @@ function setupTodoLayers(){
 
   applyModeVisibility();
   updateStatusVisuals();
+  setTimeout(refreshStreetSegments,0);
+}
+
+
+function meterDistance(a,b){
+  const lat1=a[1]*Math.PI/180, lat2=b[1]*Math.PI/180;
+  const dLat=(b[1]-a[1])*Math.PI/180;
+  const dLon=(b[0]-a[0])*Math.PI/180;
+  const h=Math.sin(dLat/2)**2+Math.cos(lat1)*Math.cos(lat2)*Math.sin(dLon/2)**2;
+  return 6371000*2*Math.atan2(Math.sqrt(h),Math.sqrt(1-h));
+}
+function lerpCoord(a,b,t){return [a[0]+(b[0]-a[0])*t,a[1]+(b[1]-a[1])*t]}
+function lineMidpoint(coords){
+  if(!coords?.length)return null;
+  let total=0; const ds=[];
+  for(let i=1;i<coords.length;i++){const d=meterDistance(coords[i-1],coords[i]);ds.push(d);total+=d}
+  if(!total)return coords[0];
+  const target=total/2; let acc=0;
+  for(let i=1;i<coords.length;i++){
+    if(acc+ds[i-1]>=target){return lerpCoord(coords[i-1],coords[i],(target-acc)/(ds[i-1]||1))}
+    acc+=ds[i-1];
+  }
+  return coords[coords.length-1];
+}
+function splitLine(coords,maxMeters=STREET_SEGMENT_METERS){
+  if(!Array.isArray(coords)||coords.length<2)return [];
+  const out=[]; let current=[coords[0]],remaining=maxMeters;
+  for(let i=1;i<coords.length;i++){
+    let a=current[current.length-1],b=coords[i],d=meterDistance(a,b);
+    if(!Number.isFinite(d)||d<=0){current.push(b);continue}
+    while(d>remaining){
+      const cut=lerpCoord(a,b,remaining/d);
+      current.push(cut); if(current.length>1)out.push(current);
+      current=[cut]; a=cut; d=meterDistance(a,b); remaining=maxMeters;
+    }
+    current.push(b); remaining-=d;
+    if(remaining<=1){if(current.length>1)out.push(current);current=[b];remaining=maxMeters}
+  }
+  if(current.length>1&&meterDistance(current[0],current[current.length-1])>3)out.push(current);
+  return out;
+}
+function segmentId(place,name,coords){
+  const mid=lineMidpoint(coords)||coords[0];
+  return `streetseg:${slug(place)}:${slug(name)}:${mid[1].toFixed(5)}:${mid[0].toFixed(5)}`;
+}
+function segmentState(id,streetName){
+  return states.get(id)||states.get(streetId(currentPlace,streetName))||null;
+}
+function refreshStreetSegments(){
+  if(!mapReady||!vectorSource||!map.getSource("street-segments"))return;
+  if(map.getZoom()<13.7){
+    map.getSource("street-segments").setData({type:"FeatureCollection",features:[]});
+    streetSegmentSignature=""; return;
+  }
+  let raw=[];
+  try{raw=map.querySourceFeatures(vectorSource,{sourceLayer:"transportation_name"})||[]}catch(e){console.warn(e);return}
+  const features=new Map();
+  for(const f of raw){
+    const name=String(f.properties?.name||"").trim(); if(!name)continue;
+    const lines=f.geometry?.type==="LineString"?[f.geometry.coordinates]:(f.geometry?.type==="MultiLineString"?f.geometry.coordinates:[]);
+    for(const line of lines){
+      if(!Array.isArray(line)||line.length<2)continue;
+      for(const coords of splitLine(line,STREET_SEGMENT_METERS)){
+        const mid=lineMidpoint(coords); if(!mid||!inCurrentPlace(mid[0],mid[1]))continue;
+        const id=segmentId(currentPlace,name,coords); if(features.has(id))continue;
+        const saved=segmentState(id,name); const status=saved?.status||"todo";
+        features.set(id,{type:"Feature",geometry:{type:"LineString",coordinates:coords},properties:{id,status,name,street_name:name,lat:mid[1],lon:mid[0]}});
+      }
+    }
+  }
+  const list=[...features.values()];
+  list.sort((a,b)=>String(a.properties.id).localeCompare(String(b.properties.id)));
+  const sig=list.map(f=>`${f.properties.id}:${f.properties.status}`).join("|");
+  if(sig===streetSegmentSignature)return;
+  streetSegmentSignature=sig;
+  map.getSource("street-segments").setData({type:"FeatureCollection",features:list});
+}
+function scheduleStreetSegmentRefresh(){
+  clearTimeout(streetSegmentRefreshTimer);
+  streetSegmentRefreshTimer=setTimeout(refreshStreetSegments,100);
+}
+function segmentItemFromFeature(f){
+  if(!f)return null; const p=f.properties||{}; const coords=f.geometry?.coordinates; const mid=lineMidpoint(coords);
+  const name=String(p.street_name||p.name||"Straat").trim();
+  const lat=Number(p.lat??mid?.[1]),lon=Number(p.lon??mid?.[0]);
+  if(!p.id||!Number.isFinite(lat)||!Number.isFinite(lon))return null;
+  return {id:String(p.id),item_type:"street",place:currentPlace,name:`${name} · straatdeel`,street_name:name,house_number:null,lat,lon};
 }
 
 function updateStatusVisuals(){
@@ -640,9 +755,10 @@ function updateStatusVisuals(){
   const houseFeatures=[];
   const maskFeatures=[];
   for(const s of states.values()){
-    if(s.item_type==="street"){
-      if(s.status==="done") doneNames.push(s.name);
-      if(s.status==="doing") doingNames.push(s.name);
+    if(s.item_type==="street" && !String(s.id||"").startsWith("streetseg:")){
+      const streetName=s.street_name||s.name;
+      if(s.status==="done") doneNames.push(streetName);
+      if(s.status==="doing") doingNames.push(streetName);
     }
     if(s.item_type==="house" && Number.isFinite(Number(s.lon)) && Number.isFinite(Number(s.lat)) && s.status!=="todo"){
       const coords=[Number(s.lon),Number(s.lat)];
@@ -692,21 +808,30 @@ function updateStatusVisuals(){
     });
     map.getSource("house-mask")?.setData({type:"FeatureCollection",features:visibleMask});
   }
+  streetSegmentSignature="";
+  refreshStreetSegments();
   applyModeVisibility();
 }
 function applyModeVisibility(){
+  const detailedStreetMode=currentMode==="street" && map.getZoom()>=14;
   if(map.getLayer("todo-streets")){
     map.setLayoutProperty("todo-streets","visibility",currentMode==="street"?"visible":"none");
+  }
+  if(map.getLayer("street-segments-line")){
+    const filter=currentFilter==="all"?["in",["get","status"],["literal",["todo","doing","done"]]]:["==",["get","status"],currentFilter];
+    map.setFilter("street-segments-line",filter);
+    map.setLayoutProperty("street-segments-line","visibility",detailedStreetMode?"visible":"none");
+    map.setLayoutProperty("street-segments-hitbox","visibility",detailedStreetMode?"visible":"none");
   }
 
   // Afgevinkte/actieve straten blijven ook zichtbaar in Huizen-modus,
   // zodat je tijdens het huis-voor-huis werken ziet welke straten al gedaan zijn.
   if(map.getLayer("doing-streets")){
-    const showDoing=(currentFilter==="all"||currentFilter==="doing");
+    const showDoing=!detailedStreetMode&&(currentFilter==="all"||currentFilter==="doing");
     map.setLayoutProperty("doing-streets","visibility",showDoing?"visible":"none");
   }
   if(map.getLayer("done-streets")){
-    const showDone=(currentFilter==="all"||currentFilter==="done");
+    const showDone=!detailedStreetMode&&(currentFilter==="all"||currentFilter==="done");
     map.setLayoutProperty("done-streets","visibility",showDone?"visible":"none");
   }
 
@@ -731,7 +856,7 @@ function applyModeVisibility(){
   el("bulkSelectFab").classList.toggle("hidden", currentMode!=="house");
 
   el("modePill").textContent=currentMode==="street"
-    ?"Straten · alleen afgeronde huizen zichtbaar"
+    ?(map.getZoom()>=14?"Straten · secties van ±25 meter":"Straten · zoom in voor kleinere secties")
     :"Huizen · afgeronde straten blijven zichtbaar";
 }
 
@@ -800,6 +925,8 @@ async function setPlace(place,fit=true){
   map.setMaxBounds([[p.bbox[0],p.bbox[1]],[p.bbox[2],p.bbox[3]]]);
   await loadBoundary(place,fit);
   await loadStates();
+  streetSegmentSignature="";
+  refreshStreetSegments();
 }
 function inCurrentPlace(lon,lat){
   if(currentBoundary) return pointInBoundary(lon,lat,currentBoundary);
@@ -809,6 +936,17 @@ function identify(point,lngLat=null){
   if(lngLat && !inCurrentPlace(lngLat.lng,lngLat.lat)) return null;
 
   if(currentMode==="street"){
+    if(map.getZoom()>=14&&map.getLayer("street-segments-line")){
+      const segs=map.queryRenderedFeatures(
+        [[point.x-18,point.y-18],[point.x+18,point.y+18]],
+        {layers:["street-segments-line"]}
+      )||[];
+      if(segs.length){
+        const rank={done:3,doing:2,todo:1};
+        segs.sort((a,b)=>(rank[b.properties?.status]||0)-(rank[a.properties?.status]||0));
+        const item=segmentItemFromFeature(segs[0]); if(item)return item;
+      }
+    }
     const fs=map.queryRenderedFeatures(
       [[point.x-10,point.y-10],[point.x+10,point.y+10]],
       {layers:["done-streets","doing-streets","todo-streets"]}
@@ -816,16 +954,7 @@ function identify(point,lngLat=null){
     const f=fs.find(x=>x.properties?.name);
     if(!f) return null;
     const name=f.properties.name;
-    return {
-      id:streetId(currentPlace,name),
-      item_type:"street",
-      place:currentPlace,
-      name,
-      street_name:name,
-      house_number:null,
-      lat:null,
-      lon:null
-    };
+    return {id:streetId(currentPlace,name),item_type:"street",place:currentPlace,name,street_name:name,house_number:null,lat:null,lon:null};
   }
 
   let fs=map.queryRenderedFeatures(
@@ -1127,12 +1256,15 @@ async function applyBulkStatus(status){
 
 function openItem(item){
   selectedItem=item; const s=stateFor(item.id); selectedStatus=s.status||"todo";
-  el("itemType").textContent=item.item_type==="street" ? `${item.place} · Straat` : `${item.place} · Huis`;
+  el("itemType").textContent=item.item_type==="street"
+    ? `${item.place} · ${String(item.id||"").startsWith("streetseg:")?"Straatdeel":"Straat"}`
+    : `${item.place} · Huis`;
   el("itemTitle").textContent=item.name;
   el("personInput").value=s.person||currentUser||"";
   el("dateInput").value=s.status_date||"";
   el("flyersInput").value=s.flyers||0;
   el("noteInput").value=s.note||"";
+  el("resetItemBtn").classList.toggle("hidden",(s.status||"todo")==="todo");
   document.querySelectorAll(".statuses button").forEach(b=>b.classList.toggle("selected",b.dataset.status===selectedStatus));
   el("itemDialog").showModal();
 }
@@ -1148,7 +1280,7 @@ async function markDone(item){
     status:"done",person:currentUser,status_date:today(),flyers:old.flyers||0,note:old.note||null,
     lat:item.lat??old.lat??null,lon:item.lon??old.lon??null,updated_at:new Date().toISOString()
   };
-  try{const d=await upsert(row);states.set(row.id,d||row);updateStatusVisuals();updateCounts();showToast(`${item.name} afgerond`)}
+  try{const d=await upsert(row);states.set(row.id,d||row);streetSegmentSignature="";updateStatusVisuals();updateCounts();showToast(`${item.name} afgerond`)}
   catch(e){console.error(e);showToast("Opslaan is niet gelukt")}
 }
 
@@ -1228,6 +1360,17 @@ canvas.addEventListener("pointerup",e=>{
 },{passive:true}));
 
 
+map.on("click","street-segments-hitbox",e=>{
+  if(currentMode!=="street"||map.getZoom()<14)return;
+  if(longFired){longFired=false;return;}
+  let fs=[];
+  try{fs=map.queryRenderedFeatures([[e.point.x-16,e.point.y-16],[e.point.x+16,e.point.y+16]],{layers:["street-segments-line"]})||[]}catch(_){}
+  if(!fs.length&&e.features?.length)fs=[...e.features];
+  const rank={done:3,doing:2,todo:1};
+  fs.sort((a,b)=>(rank[b.properties?.status]||0)-(rank[a.properties?.status]||0));
+  const item=segmentItemFromFeature(fs[0]); if(item)openItem(item);
+});
+
 map.on("click","house-hitbox",e=>{
   if(currentMode!=="house") return;
   if(longFired){longFired=false;return;}
@@ -1276,6 +1419,7 @@ map.on("click",e=>{
     return;
   }
 
+  if(currentMode==="street"&&map.getZoom()>=14)return;
   const item=identify(e.point,e.lngLat);
   if(item)openItem(item);
 });
@@ -1288,6 +1432,18 @@ document.querySelectorAll(".statuses button").forEach(b=>b.onclick=()=>{
     if(!el("dateInput").value)el("dateInput").value=today();
   }
 });
+el("resetItemBtn").onclick=async()=>{
+  if(!selectedItem)return;
+  const old=stateFor(selectedItem.id);
+  const row={id:selectedItem.id,item_type:selectedItem.item_type,place:selectedItem.place,name:selectedItem.name,
+    street_name:selectedItem.street_name,house_number:selectedItem.house_number,status:"todo",person:null,status_date:null,
+    flyers:old.flyers||0,note:old.note||null,lat:selectedItem.lat??old.lat??null,lon:selectedItem.lon??old.lon??null,updated_at:new Date().toISOString()};
+  const btn=el("resetItemBtn");btn.disabled=true;
+  try{const d=await upsert(row);states.set(row.id,d||row);streetSegmentSignature="";updateStatusVisuals();updateCounts();el("itemDialog").close();showToast("Teruggezet naar nog te doen")}
+  catch(e){console.error(e);showToast("Terugzetten is niet gelukt")}
+  finally{btn.disabled=false}
+};
+
 el("saveBtn").onclick=async()=>{
   if(!selectedItem)return;
   const old=stateFor(selectedItem.id);
@@ -1303,7 +1459,7 @@ el("saveBtn").onclick=async()=>{
     updated_at:new Date().toISOString()
   };
   const btn=el("saveBtn");btn.disabled=true;btn.textContent="Opslaan…";
-  try{const d=await upsert(row);states.set(row.id,d||row);updateStatusVisuals();updateCounts();el("itemDialog").close()}
+  try{const d=await upsert(row);states.set(row.id,d||row);streetSegmentSignature="";updateStatusVisuals();updateCounts();el("itemDialog").close()}
   catch(e){console.error(e);showToast("Opslaan is niet gelukt")}
   finally{btn.disabled=false;btn.textContent="Opslaan"}
 };
