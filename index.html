@@ -132,6 +132,19 @@ dialog::backdrop{background:rgba(26,24,35,.45)}
 }
 .search-row input:focus{outline:2px solid rgba(109,105,180,.22);border-color:var(--purple)}
 
+
+#bulkDialog{width:min(100%,620px);border-radius:24px 24px 0 0;padding:0;margin:auto auto 0}
+.bulk-text{color:var(--muted);font-size:13px;line-height:1.45;margin:12px 0 0}
+.selection-box{
+  position:absolute;z-index:12;border:2px solid var(--dark);
+  background:rgba(109,105,180,.12);pointer-events:none;border-radius:8px
+}
+.select-mode-tip{
+  position:absolute;left:50%;top:12px;z-index:13;transform:translateX(-50%);
+  background:#292832;color:#fff;border-radius:999px;padding:9px 13px;
+  font-size:12px;font-weight:850;white-space:nowrap;box-shadow:0 6px 18px rgba(0,0,0,.2)
+}
+
 </style>
 </head>
 <body>
@@ -156,6 +169,8 @@ dialog::backdrop{background:rgba(26,24,35,.45)}
   <div id="map"></div>
   <div class="mode-pill" id="modePill">Straten · grijs = nog te doen</div>
   <div class="loader hidden" id="loader">Kaart laden</div>
+  <div class="selection-box hidden" id="selectionBox"></div>
+  <div class="select-mode-tip hidden" id="selectModeTip">Sleep een vak over de huizen</div>
   <button class="location-btn" id="locateBtn">⌖ Mijn locatie</button>
 </main>
 <div class="toast" id="toast"></div>
@@ -199,10 +214,35 @@ dialog::backdrop{background:rgba(26,24,35,.45)}
       </div>
     </section>
     <section class="section">
+      <button class="menu-action" id="bulkSelectBtn">Meerdere huizen selecteren</button>
       <button class="menu-action" id="changeName">Naam wijzigen</button>
       <button class="menu-action" id="reloadBtn">Voortgang vernieuwen</button>
     </section>
-    <p class="help">De paarse stippellijn is de dorpsgrens. Alleen straten en huizen binnen die grens zijn actief. In Huizen blijven afgeronde straten groen en straten die bezig zijn oranje zichtbaar, zodat u overzicht houdt terwijl u per huis werkt. Huisnummers verschijnen automatisch wanneer u voldoende inzoomt. Houd een straat of huis ingedrukt om deze direct af te ronden; tik kort voor meer opties.</p>
+    <p class="help">De paarse stippellijn is de dorpsgrens. Alleen straten en huizen binnen die grens zijn actief. In Huizen blijven afgeronde straten groen en straten die bezig zijn oranje zichtbaar. Afgeronde huizen worden direct als groene stip opgeslagen en blijven na opnieuw openen zichtbaar. Huisnummers verschijnen automatisch wanneer u voldoende inzoomt. Houd een straat of huis ingedrukt om deze direct af te ronden; tik kort voor meer opties.</p>
+  </div>
+</dialog>
+
+
+<dialog id="bulkDialog">
+  <div class="sheet">
+    <div class="handle"></div>
+    <div class="sheet-head">
+      <div>
+        <p class="eyebrow">Meerdere huizen</p>
+        <h2><span id="bulkCount">0</span> huizen geselecteerd</h2>
+      </div>
+      <button class="close" id="closeBulk">×</button>
+    </div>
+
+    <p class="bulk-text">Kies wat u met alle geselecteerde huizen wilt doen.</p>
+
+    <div class="statuses">
+      <button class="s-todo" data-bulk-status="todo">Nog te doen</button>
+      <button class="s-doing" data-bulk-status="doing">Bezig</button>
+      <button class="s-done" data-bulk-status="done">Afgerond</button>
+    </div>
+
+    <button class="primary" id="bulkCancel">Annuleren</button>
   </div>
 </dialog>
 
@@ -258,10 +298,17 @@ let mapReady=false;
 let toastTimer=null;
 let currentBoundary=null;
 const boundaryCache=new Map();
+let bulkSelectMode=false;
+let bulkSelectedItems=[];
+let bulkStart=null;
 
 function slug(s){return String(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,120)}
 function streetId(place,name){return `street:${slug(place)}:${slug(name)}`}
-function houseId(place,num,lon,lat){return `house:${slug(place)}:${slug(num)}:${lat.toFixed(5)}:${lon.toFixed(5)}`}
+function houseId(place,num,lon,lat){
+  const safeLat=Number.isFinite(Number(lat)) ? Number(lat).toFixed(5) : "unknown";
+  const safeLon=Number.isFinite(Number(lon)) ? Number(lon).toFixed(5) : "unknown";
+  return `house:${slug(place)}:${slug(num)}:${safeLat}:${safeLon}`;
+}
 function stateFor(id){return states.get(id)||{status:"todo",person:"",status_date:null,flyers:0,note:""}}
 function showToast(msg){el("toast").textContent=msg;el("toast").classList.add("show");clearTimeout(toastTimer);toastTimer=setTimeout(()=>el("toast").classList.remove("show"),1800)}
 function setLoading(on,text="Kaart laden"){el("loader").textContent=text;el("loader").classList.toggle("hidden",!on)}
@@ -366,6 +413,17 @@ async function upsert(row){
   const r=await fetch(`${CFG.url}/rest/v1/distribution_items?on_conflict=id`,{method:"POST",headers:dbHeaders,body:JSON.stringify(row)});
   if(!r.ok) throw new Error(await r.text());
   const d=await r.json(); return Array.isArray(d)?d[0]:d;
+}
+
+async function upsertMany(rows){
+  const r=await fetch(`${CFG.url}/rest/v1/distribution_items?on_conflict=id`,{
+    method:"POST",
+    headers:dbHeaders,
+    body:JSON.stringify(rows)
+  });
+  if(!r.ok) throw new Error(await r.text());
+  const d=await r.json();
+  return Array.isArray(d)?d:[];
 }
 
 const map=new maplibregl.Map({
@@ -487,7 +545,7 @@ function updateStatusVisuals(){
       if(s.status==="done") doneNames.push(s.name);
       if(s.status==="doing") doingNames.push(s.name);
     }
-    if(s.item_type==="house" && Number.isFinite(s.lon) && Number.isFinite(s.lat) && s.status!=="todo"){
+    if(s.item_type==="house" && Number.isFinite(Number(s.lon)) && Number.isFinite(Number(s.lat)) && s.status!=="todo"){
       houseFeatures.push({type:"Feature",geometry:{type:"Point",coordinates:[s.lon,s.lat]},properties:{id:s.id,status:s.status,name:s.name}});
     }
   }
@@ -639,13 +697,11 @@ function identify(point,lngLat=null){
     };
   }
 
-  // 1. Probeer eerst onze eigen zichtbare/ruime huislagen.
   let fs=map.queryRenderedFeatures(
     [[point.x-24,point.y-24],[point.x+24,point.y+24]],
     {layers:["house-status-dots","house-hitbox","todo-houses"]}
   );
 
-  // Reeds opgeslagen huis.
   const saved=fs.find(f=>f.layer?.id==="house-status-dots" && f.properties?.id);
   if(saved){
     const s=states.get(saved.properties.id);
@@ -658,17 +714,15 @@ function identify(point,lngLat=null){
     }
   }
 
-  // Nieuw huis uit de vectorlaag.
   let candidate=fs.find(f=>f.layer?.id==="house-hitbox" || f.layer?.id==="todo-houses");
 
-  // 2. Fallback: zoek direct in de vectorbron naar het dichtstbijzijnde huisnummer.
   if(!candidate && vectorSource){
     try{
       const sourceFeatures=map.querySourceFeatures(vectorSource,{sourceLayer:"housenumber"})||[];
       let best=null,bestDist=Infinity;
       for(const f of sourceFeatures){
         const coords=f.geometry?.coordinates;
-        if(!Array.isArray(coords) || typeof coords[0]!=="number") continue;
+        if(!Array.isArray(coords) || typeof coords[0]!=="number" || typeof coords[1]!=="number") continue;
         const p=map.project(coords);
         const d=Math.hypot(p.x-point.x,p.y-point.y);
         if(d<bestDist && d<=32){best=f;bestDist=d;}
@@ -677,8 +731,6 @@ function identify(point,lngLat=null){
     }catch(e){console.warn("Huisbron zoeken mislukt",e)}
   }
 
-  // 3. Laatste fallback: kijk naar alle gerenderde features rond het tikpunt
-  // en zoek iets met een huisnummer-eigenschap.
   if(!candidate){
     const all=map.queryRenderedFeatures(
       [[point.x-28,point.y-28],[point.x+28,point.y+28]]
@@ -691,13 +743,6 @@ function identify(point,lngLat=null){
 
   if(!candidate) return null;
 
-  const coords=candidate.geometry?.coordinates;
-  if(!Array.isArray(coords) || typeof coords[0]!=="number") return null;
-
-  const lon=Number(coords[0]),lat=Number(coords[1]);
-  if(!Number.isFinite(lon)||!Number.isFinite(lat)) return null;
-  if(!inCurrentPlace(lon,lat)) return null;
-
   const props=candidate.properties||{};
   const num=String(
     props.housenumber ??
@@ -708,6 +753,23 @@ function identify(point,lngLat=null){
   );
 
   const street=props.street ?? props["addr:street"] ?? null;
+
+  // Probeer eerst de echte featurecoördinaten. Als MapLibre broncoördinaten niet
+  // bruikbaar zijn, gebruiken we het daadwerkelijke tikpunt op de kaart.
+  let lon=null,lat=null;
+  const coords=candidate.geometry?.coordinates;
+  if(Array.isArray(coords) && Number.isFinite(Number(coords[0])) && Number.isFinite(Number(coords[1]))){
+    const cLon=Number(coords[0]), cLat=Number(coords[1]);
+    if(Math.abs(cLon)<=180 && Math.abs(cLat)<=90){
+      lon=cLon; lat=cLat;
+    }
+  }
+  if((lon===null || lat===null) && lngLat){
+    lon=Number(lngLat.lng); lat=Number(lngLat.lat);
+  }
+  if(!Number.isFinite(lon) || !Number.isFinite(lat)) return null;
+  if(!inCurrentPlace(lon,lat)) return null;
+
   const display=street ? `${street} ${num}` : `Huis ${num}`;
 
   return {
@@ -720,6 +782,149 @@ function identify(point,lngLat=null){
     lat,lon
   };
 }
+
+function featureToHouseItem(f){
+  const props=f.properties||{};
+  let lon=null,lat=null;
+  const coords=f.geometry?.coordinates;
+  if(Array.isArray(coords) && Number.isFinite(Number(coords[0])) && Number.isFinite(Number(coords[1]))){
+    lon=Number(coords[0]); lat=Number(coords[1]);
+  }
+  if(!Number.isFinite(lon)||!Number.isFinite(lat)) return null;
+
+  if(f.layer?.id==="house-status-dots" && props.id){
+    const saved=states.get(props.id);
+    if(saved){
+      return {
+        id:saved.id,item_type:"house",place:saved.place,name:saved.name,
+        street_name:saved.street_name,house_number:saved.house_number,
+        lat:Number(saved.lat),lon:Number(saved.lon)
+      };
+    }
+  }
+
+  const num=String(
+    props.housenumber ??
+    props.house_number ??
+    props["addr:housenumber"] ??
+    props.name ??
+    "Huis"
+  );
+  const street=props.street ?? props["addr:street"] ?? null;
+
+  return {
+    id:houseId(currentPlace,num,lon,lat),
+    item_type:"house",
+    place:currentPlace,
+    name:street ? `${street} ${num}` : `Huis ${num}`,
+    street_name:street,
+    house_number:num,
+    lat,lon
+  };
+}
+
+function beginBulkSelect(){
+  currentMode="house";
+  el("houseMode").classList.add("active");
+  el("streetMode").classList.remove("active");
+  applyModeVisibility();
+
+  if(map.getZoom()<16) map.easeTo({zoom:17});
+
+  bulkSelectMode=true;
+  bulkSelectedItems=[];
+  el("menuDialog").close();
+  el("selectModeTip").classList.remove("hidden");
+  el("modePill").classList.add("hidden");
+  map.dragPan.disable();
+  showToast("Sleep met uw vinger een vak over de huizen");
+}
+
+function endBulkSelect(){
+  bulkSelectMode=false;
+  bulkStart=null;
+  el("selectionBox").classList.add("hidden");
+  el("selectModeTip").classList.add("hidden");
+  el("modePill").classList.remove("hidden");
+  map.dragPan.enable();
+}
+
+function selectHousesInBox(a,b){
+  const minX=Math.min(a.x,b.x), maxX=Math.max(a.x,b.x);
+  const minY=Math.min(a.y,b.y), maxY=Math.max(a.y,b.y);
+
+  let features=[];
+  try{
+    features=map.queryRenderedFeatures(
+      [[minX,minY],[maxX,maxY]],
+      {layers:["house-status-dots","house-hitbox","todo-houses"]}
+    )||[];
+  }catch(e){console.warn(e)}
+
+  const byId=new Map();
+  for(const f of features){
+    const item=featureToHouseItem(f);
+    if(!item) continue;
+    if(!inCurrentPlace(item.lon,item.lat)) continue;
+    byId.set(item.id,item);
+  }
+
+  bulkSelectedItems=[...byId.values()];
+  if(!bulkSelectedItems.length){
+    showToast("Geen huizen in dit vak gevonden");
+    endBulkSelect();
+    return;
+  }
+
+  el("bulkCount").textContent=bulkSelectedItems.length;
+  endBulkSelect();
+  el("bulkDialog").showModal();
+}
+
+async function applyBulkStatus(status){
+  if(!bulkSelectedItems.length) return;
+
+  const now=new Date().toISOString();
+  const rows=bulkSelectedItems.map(item=>{
+    const old=stateFor(item.id);
+    return {
+      id:item.id,
+      item_type:"house",
+      place:item.place,
+      name:item.name,
+      street_name:item.street_name,
+      house_number:item.house_number,
+      status,
+      person:status==="todo"?null:(currentUser||old.person||null),
+      status_date:status==="todo"?null:today(),
+      flyers:old.flyers||0,
+      note:old.note||null,
+      lat:item.lat,
+      lon:item.lon,
+      updated_at:now
+    };
+  });
+
+  const buttons=[...document.querySelectorAll("[data-bulk-status]")];
+  buttons.forEach(b=>b.disabled=true);
+
+  try{
+    const saved=await upsertMany(rows);
+    const savedMap=new Map(saved.map(x=>[x.id,x]));
+    rows.forEach(r=>states.set(r.id,savedMap.get(r.id)||r));
+    updateStatusVisuals();
+    updateCounts();
+    el("bulkDialog").close();
+    showToast(`${rows.length} huizen bijgewerkt`);
+  }catch(e){
+    console.error(e);
+    showToast("Meerdere huizen opslaan is niet gelukt");
+  }finally{
+    buttons.forEach(b=>b.disabled=false);
+    bulkSelectedItems=[];
+  }
+}
+
 function openItem(item){
   selectedItem=item; const s=stateFor(item.id); selectedStatus=s.status||"todo";
   el("itemType").textContent=item.item_type==="street" ? `${item.place} · Straat` : `${item.place} · Huis`;
@@ -732,6 +937,10 @@ function openItem(item){
   el("itemDialog").showModal();
 }
 async function markDone(item){
+  if(item.item_type==="house" && (!Number.isFinite(Number(item.lat)) || !Number.isFinite(Number(item.lon)))){
+    showToast("Dit huis kon niet goed worden gekoppeld. Tik nogmaals op het huisnummer.");
+    return;
+  }
   const old=stateFor(item.id);
   const row={
     id:item.id,item_type:item.item_type,place:item.place,name:item.name,
@@ -743,10 +952,34 @@ async function markDone(item){
   catch(e){console.error(e);showToast("Opslaan is niet gelukt")}
 }
 
+
+const selectBox=el("selectionBox");
+
+function updateSelectionBox(start,current){
+  const left=Math.min(start.x,current.x);
+  const top=Math.min(start.y,current.y);
+  const width=Math.abs(current.x-start.x);
+  const height=Math.abs(current.y-start.y);
+  selectBox.style.left=left+"px";
+  selectBox.style.top=top+"px";
+  selectBox.style.width=width+"px";
+  selectBox.style.height=height+"px";
+  selectBox.classList.remove("hidden");
+}
+
 let pressTimer=null,startPoint=null,longFired=false;
 const canvas=map.getCanvasContainer();
 canvas.addEventListener("pointerdown",e=>{
   if(e.pointerType==="mouse"&&e.button!==0)return;
+
+  const rect=canvas.getBoundingClientRect();
+  if(bulkSelectMode){
+    bulkStart={x:e.clientX-rect.left,y:e.clientY-rect.top};
+    updateSelectionBox(bulkStart,bulkStart);
+    try{canvas.setPointerCapture(e.pointerId)}catch(_){}
+    return;
+  }
+
   longFired=false;startPoint={x:e.clientX,y:e.clientY};
   clearTimeout(pressTimer);
   pressTimer=setTimeout(()=>{
@@ -760,9 +993,36 @@ canvas.addEventListener("pointerdown",e=>{
   },700);
 },{passive:true});
 canvas.addEventListener("pointermove",e=>{
+  if(bulkSelectMode && bulkStart){
+    const rect=canvas.getBoundingClientRect();
+    const p={x:e.clientX-rect.left,y:e.clientY-rect.top};
+    updateSelectionBox(bulkStart,p);
+    return;
+  }
   if(startPoint&&Math.hypot(e.clientX-startPoint.x,e.clientY-startPoint.y)>12){clearTimeout(pressTimer);startPoint=null}
 },{passive:true});
-["pointerup","pointercancel","pointerleave"].forEach(t=>canvas.addEventListener(t,()=>{clearTimeout(pressTimer);startPoint=null},{passive:true}));
+canvas.addEventListener("pointerup",e=>{
+  if(bulkSelectMode && bulkStart){
+    const rect=canvas.getBoundingClientRect();
+    const end={x:e.clientX-rect.left,y:e.clientY-rect.top};
+    const start={...bulkStart};
+    bulkStart=null;
+    if(Math.abs(end.x-start.x)<12 || Math.abs(end.y-start.y)<12){
+      el("selectionBox").classList.add("hidden");
+      showToast("Maak een iets groter vak");
+      return;
+    }
+    selectHousesInBox(start,end);
+    return;
+  }
+  clearTimeout(pressTimer);startPoint=null;
+},{passive:true});
+["pointercancel","pointerleave"].forEach(t=>canvas.addEventListener(t,()=>{
+  if(bulkSelectMode){
+    bulkStart=null;el("selectionBox").classList.add("hidden");
+  }
+  clearTimeout(pressTimer);startPoint=null;
+},{passive:true}));
 
 
 map.on("click","house-hitbox",e=>{
@@ -771,24 +1031,32 @@ map.on("click","house-hitbox",e=>{
   const f=e.features?.[0];
   if(!f) return;
   const coords=f.geometry?.coordinates;
-  if(!Array.isArray(coords)) return;
   const p=f.properties||{};
   const num=String(p.housenumber ?? p.house_number ?? p["addr:housenumber"] ?? p.name ?? "Huis");
   const street=p.street ?? p["addr:street"] ?? null;
+
+  let lon=Array.isArray(coords) ? Number(coords[0]) : NaN;
+  let lat=Array.isArray(coords) ? Number(coords[1]) : NaN;
+  if(!Number.isFinite(lon) || !Number.isFinite(lat) || Math.abs(lon)>180 || Math.abs(lat)>90){
+    lon=Number(e.lngLat?.lng);
+    lat=Number(e.lngLat?.lat);
+  }
+  if(!Number.isFinite(lon) || !Number.isFinite(lat)) return;
+
   const item={
-    id:houseId(currentPlace,num,Number(coords[0]),Number(coords[1])),
+    id:houseId(currentPlace,num,lon,lat),
     item_type:"house",
     place:currentPlace,
     name:street ? `${street} ${num}` : `Huis ${num}`,
     street_name:street,
     house_number:num,
-    lat:Number(coords[1]),
-    lon:Number(coords[0])
+    lat,lon
   };
   openItem(item);
 });
 
 map.on("click",e=>{
+  if(bulkSelectMode) return;
   if(longFired){longFired=false;return}
   const item=identify(e.point,e.lngLat);
   if(item)openItem(item);
@@ -850,6 +1118,10 @@ el("locateBtn").onclick=()=>{
   },()=>{showToast("Locatie kon niet worden opgehaald");el("locateBtn").textContent="⌖ Mijn locatie"},{enableHighAccuracy:true,timeout:10000,maximumAge:30000});
 };
 
+el("bulkSelectBtn").onclick=beginBulkSelect;
+el("closeBulk").onclick=()=>{bulkSelectedItems=[];el("bulkDialog").close()};
+el("bulkCancel").onclick=()=>{bulkSelectedItems=[];el("bulkDialog").close()};
+document.querySelectorAll("[data-bulk-status]").forEach(b=>b.onclick=()=>applyBulkStatus(b.dataset.bulkStatus));
 el("menuBtn").onclick=()=>el("menuDialog").showModal();
 el("closeMenu").onclick=()=>el("menuDialog").close();
 el("closeItem").onclick=()=>el("itemDialog").close();
