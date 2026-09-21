@@ -162,6 +162,47 @@ dialog::backdrop{background:rgba(26,24,35,.45)}
 }
 .bulk-fab:active{transform:scale(.98)}
 
+
+.bulk-toolbar{
+  position:absolute;
+  left:12px;right:12px;
+  bottom:calc(16px + env(safe-area-inset-bottom));
+  z-index:14;
+  display:grid;
+  grid-template-columns:minmax(82px,1fr) auto auto auto auto;
+  align-items:center;
+  gap:7px;
+  background:rgba(255,255,255,.97);
+  border:1px solid var(--border);
+  border-radius:18px;
+  padding:7px;
+  box-shadow:0 10px 30px rgba(55,50,85,.22);
+  backdrop-filter:blur(12px)
+}
+.bulk-toolbar-count{
+  min-width:0;
+  padding:0 7px;
+  color:var(--dark);
+  line-height:1.05
+}
+.bulk-toolbar-count b{display:block;font-size:18px}
+.bulk-toolbar-count span{display:block;color:var(--muted);font-size:9px;margin-top:2px}
+.bulk-toolbar button{
+  border:1px solid var(--border);
+  background:#fff;
+  color:var(--dark);
+  border-radius:12px;
+  min-height:40px;
+  padding:8px 10px;
+  font-size:12px;
+  font-weight:850
+}
+.bulk-toolbar .bulk-done{background:var(--done);color:#fff;border-color:var(--done)}
+.bulk-toolbar .bulk-stop{font-size:18px;padding:6px 11px}
+.bulk-toolbar button.active{background:#EFEEFA;border-color:#CFC9F0}
+.bulk-mode .location-btn{display:none}
+.bulk-mode .bulk-fab{display:none!important}
+
 </style>
 </head>
 <body>
@@ -188,7 +229,16 @@ dialog::backdrop{background:rgba(26,24,35,.45)}
   <div class="loader hidden" id="loader">Kaart laden</div>
   <div class="selection-box hidden" id="selectionBox"></div>
   <div class="select-mode-tip hidden" id="selectModeTip">Sleep een vak over de huizen</div>
-  <button class="bulk-fab hidden" id="bulkSelectFab" type="button">▧ Meerdere huizen</button>
+  <button class="bulk-fab hidden" id="bulkSelectFab" type="button">✓ Selecteer huizen</button>
+
+  <div class="bulk-toolbar hidden" id="bulkToolbar">
+    <div class="bulk-toolbar-count"><b id="bulkToolbarCount">0</b><span>geselecteerd</span></div>
+    <button id="bulkDrawBtn" type="button">▧ Vak</button>
+    <button id="bulkDoneBtn" type="button" class="bulk-done">✓ Afronden</button>
+    <button id="bulkMoreBtn" type="button">•••</button>
+    <button id="bulkStopBtn" type="button" class="bulk-stop">×</button>
+  </div>
+
   <button class="location-btn" id="locateBtn">⌖ Mijn locatie</button>
 </main>
 <div class="toast" id="toast"></div>
@@ -236,7 +286,7 @@ dialog::backdrop{background:rgba(26,24,35,.45)}
       <button class="menu-action" id="changeName">Naam wijzigen</button>
       <button class="menu-action" id="reloadBtn">Voortgang vernieuwen</button>
     </section>
-    <p class="help">De paarse stippellijn is de dorpsgrens. Alleen straten en huizen binnen die grens zijn actief. In Huizen blijven afgeronde straten groen en straten die bezig zijn oranje zichtbaar. Afgeronde huizen vervangen de grijze stip, blijven na opnieuw openen groen zichtbaar en zijn als enige huisstatus ook zichtbaar wanneer u terugschakelt naar Straten. Huisnummers verschijnen automatisch wanneer u voldoende inzoomt. Houd een straat of huis ingedrukt om deze direct af te ronden; tik kort voor meer opties.</p>
+    <p class="help">De paarse stippellijn is de dorpsgrens. Alleen straten en huizen binnen die grens zijn actief. In Huizen blijven afgeronde straten groen en straten die bezig zijn oranje zichtbaar. Afgeronde huizen vervangen de grijze stip, blijven na opnieuw openen groen zichtbaar en zijn als enige huisstatus ook zichtbaar wanneer u terugschakelt naar Straten. Huisnummers verschijnen automatisch wanneer u voldoende inzoomt. Houd een straat of huis ingedrukt om deze direct af te ronden; tik kort voor meer opties. In Huizen kunt u via “Selecteer huizen” losse huizen aantikken of met “Vak” meerdere huizen tegelijk selecteren.</p>
   </div>
 </dialog>
 
@@ -317,6 +367,7 @@ let toastTimer=null;
 let currentBoundary=null;
 const boundaryCache=new Map();
 let bulkSelectMode=false;
+let bulkDrawMode=false;
 let bulkSelectedItems=[];
 let bulkStart=null;
 
@@ -544,6 +595,9 @@ function setupTodoLayers(){
   if(!map.getSource("house-mask")){
     map.addSource("house-mask",{type:"geojson",data:{type:"FeatureCollection",features:[]}});
   }
+  if(!map.getSource("house-selection")){
+    map.addSource("house-selection",{type:"geojson",data:{type:"FeatureCollection",features:[]}});
+  }
   safeAddLayer({
     id:"house-mask-dots",type:"circle",source:"house-mask",minzoom:16,
     paint:{
@@ -561,6 +615,17 @@ function setupTodoLayers(){
       "circle-radius":["interpolate",["linear"],["zoom"],16,6,18,9,20,11],
       "circle-color":["match",["get","status"],"doing",STATUS.doing,"done",STATUS.done,STATUS.todo],
       "circle-stroke-color":"#fff","circle-stroke-width":2.5,
+      "circle-opacity":1
+    }
+  });
+
+  safeAddLayer({
+    id:"house-selection-rings",type:"circle",source:"house-selection",minzoom:15,
+    paint:{
+      "circle-radius":["interpolate",["linear"],["zoom"],15,10,18,14,20,17],
+      "circle-color":"rgba(0,0,0,0)",
+      "circle-stroke-color":"#635EAF",
+      "circle-stroke-width":4,
       "circle-opacity":1
     }
   });
@@ -849,6 +914,48 @@ function identify(point,lngLat=null){
   };
 }
 
+
+function updateBulkSelectionVisuals(){
+  const src=map.getSource("house-selection");
+  if(src){
+    src.setData({
+      type:"FeatureCollection",
+      features:bulkSelectedItems
+        .filter(x=>Number.isFinite(Number(x.lon))&&Number.isFinite(Number(x.lat)))
+        .map(x=>({
+          type:"Feature",
+          geometry:{type:"Point",coordinates:[Number(x.lon),Number(x.lat)]},
+          properties:{id:x.id}
+        }))
+    });
+  }
+  el("bulkToolbarCount").textContent=bulkSelectedItems.length;
+  el("bulkCount").textContent=bulkSelectedItems.length;
+}
+
+function toggleBulkItem(item){
+  if(!item) return;
+  const idx=bulkSelectedItems.findIndex(x=>x.id===item.id);
+  if(idx>=0){
+    bulkSelectedItems.splice(idx,1);
+    showToast("Huis uit selectie gehaald");
+  }else{
+    bulkSelectedItems.push(item);
+    showToast("Huis geselecteerd");
+  }
+  updateBulkSelectionVisuals();
+}
+
+function showBulkToolbar(){
+  el("bulkToolbar").classList.remove("hidden");
+  document.body.classList.add("bulk-mode");
+  updateBulkSelectionVisuals();
+}
+function hideBulkToolbar(){
+  el("bulkToolbar").classList.add("hidden");
+  document.body.classList.remove("bulk-mode");
+}
+
 function featureToHouseItem(f){
   const props=f.properties||{};
   let lon=null,lat=null;
@@ -898,21 +1005,40 @@ function beginBulkSelect(){
   if(map.getZoom()<16) map.easeTo({zoom:17});
 
   bulkSelectMode=true;
+  bulkDrawMode=false;
   bulkSelectedItems=[];
+  bulkStart=null;
   el("menuDialog").close();
-  el("selectModeTip").classList.remove("hidden");
+  el("selectModeTip").classList.add("hidden");
   el("modePill").classList.add("hidden");
-  map.dragPan.disable();
-  showToast("Sleep met uw vinger een vak over de huizen");
+  map.dragPan.enable();
+  showBulkToolbar();
+  updateBulkSelectionVisuals();
+  showToast("Tik huizen aan om ze te selecteren");
 }
 
-function endBulkSelect(){
+function stopBulkSelect(){
   bulkSelectMode=false;
+  bulkDrawMode=false;
   bulkStart=null;
+  bulkSelectedItems=[];
   el("selectionBox").classList.add("hidden");
   el("selectModeTip").classList.add("hidden");
   el("modePill").classList.remove("hidden");
+  el("bulkDrawBtn").classList.remove("active");
   map.dragPan.enable();
+  hideBulkToolbar();
+  updateBulkSelectionVisuals();
+}
+
+function startBulkDraw(){
+  if(!bulkSelectMode) return;
+  bulkDrawMode=true;
+  bulkStart=null;
+  el("bulkDrawBtn").classList.add("active");
+  el("selectModeTip").textContent="Sleep nu een vak over de huizen";
+  el("selectModeTip").classList.remove("hidden");
+  map.dragPan.disable();
 }
 
 function selectHousesInBox(a,b){
@@ -935,16 +1061,23 @@ function selectHousesInBox(a,b){
     byId.set(item.id,item);
   }
 
-  bulkSelectedItems=[...byId.values()];
-  if(!bulkSelectedItems.length){
+  const found=[...byId.values()];
+  if(!found.length){
     showToast("Geen huizen in dit vak gevonden");
-    endBulkSelect();
-    return;
+  }else{
+    const existing=new Map(bulkSelectedItems.map(x=>[x.id,x]));
+    found.forEach(x=>existing.set(x.id,x));
+    bulkSelectedItems=[...existing.values()];
+    updateBulkSelectionVisuals();
+    showToast(`${found.length} huizen toegevoegd`);
   }
 
-  el("bulkCount").textContent=bulkSelectedItems.length;
-  endBulkSelect();
-  el("bulkDialog").showModal();
+  bulkDrawMode=false;
+  bulkStart=null;
+  el("selectionBox").classList.add("hidden");
+  el("selectModeTip").classList.add("hidden");
+  el("bulkDrawBtn").classList.remove("active");
+  map.dragPan.enable();
 }
 
 async function applyBulkStatus(status){
@@ -982,12 +1115,13 @@ async function applyBulkStatus(status){
     updateCounts();
     el("bulkDialog").close();
     showToast(`${rows.length} huizen bijgewerkt`);
+    bulkSelectedItems=[];
+    updateBulkSelectionVisuals();
   }catch(e){
     console.error(e);
     showToast("Meerdere huizen opslaan is niet gelukt");
   }finally{
     buttons.forEach(b=>b.disabled=false);
-    bulkSelectedItems=[];
   }
 }
 
@@ -1039,10 +1173,13 @@ canvas.addEventListener("pointerdown",e=>{
   if(e.pointerType==="mouse"&&e.button!==0)return;
 
   const rect=canvas.getBoundingClientRect();
-  if(bulkSelectMode){
+  if(bulkSelectMode && bulkDrawMode){
     bulkStart={x:e.clientX-rect.left,y:e.clientY-rect.top};
     updateSelectionBox(bulkStart,bulkStart);
     try{canvas.setPointerCapture(e.pointerId)}catch(_){}
+    return;
+  }
+  if(bulkSelectMode){
     return;
   }
 
@@ -1059,7 +1196,7 @@ canvas.addEventListener("pointerdown",e=>{
   },700);
 },{passive:true});
 canvas.addEventListener("pointermove",e=>{
-  if(bulkSelectMode && bulkStart){
+  if(bulkSelectMode && bulkDrawMode && bulkStart){
     const rect=canvas.getBoundingClientRect();
     const p={x:e.clientX-rect.left,y:e.clientY-rect.top};
     updateSelectionBox(bulkStart,p);
@@ -1068,7 +1205,7 @@ canvas.addEventListener("pointermove",e=>{
   if(startPoint&&Math.hypot(e.clientX-startPoint.x,e.clientY-startPoint.y)>12){clearTimeout(pressTimer);startPoint=null}
 },{passive:true});
 canvas.addEventListener("pointerup",e=>{
-  if(bulkSelectMode && bulkStart){
+  if(bulkSelectMode && bulkDrawMode && bulkStart){
     const rect=canvas.getBoundingClientRect();
     const end={x:e.clientX-rect.left,y:e.clientY-rect.top};
     const start={...bulkStart};
@@ -1084,7 +1221,7 @@ canvas.addEventListener("pointerup",e=>{
   clearTimeout(pressTimer);startPoint=null;
 },{passive:true});
 ["pointercancel","pointerleave"].forEach(t=>canvas.addEventListener(t,()=>{
-  if(bulkSelectMode){
+  if(bulkSelectMode && bulkDrawMode){
     bulkStart=null;el("selectionBox").classList.add("hidden");
   }
   clearTimeout(pressTimer);startPoint=null;
@@ -1118,12 +1255,27 @@ map.on("click","house-hitbox",e=>{
     house_number:num,
     lat,lon
   };
-  openItem(item);
+  if(bulkSelectMode){
+    toggleBulkItem(item);
+  }else{
+    openItem(item);
+  }
 });
 
 map.on("click",e=>{
-  if(bulkSelectMode) return;
   if(longFired){longFired=false;return}
+
+  if(bulkSelectMode){
+    if(bulkDrawMode) return;
+    const previousMode=currentMode;
+    currentMode="house";
+    const item=identify(e.point,e.lngLat);
+    currentMode=previousMode;
+    if(item && item.item_type==="house") toggleBulkItem(item);
+    else showToast("Tik dichter op een huis");
+    return;
+  }
+
   const item=identify(e.point,e.lngLat);
   if(item)openItem(item);
 });
@@ -1186,13 +1338,25 @@ el("locateBtn").onclick=()=>{
 
 el("bulkSelectBtn").onclick=beginBulkSelect;
 el("bulkSelectFab").onclick=beginBulkSelect;
-el("closeBulk").onclick=()=>{bulkSelectedItems=[];el("bulkDialog").close()};
-el("bulkCancel").onclick=()=>{bulkSelectedItems=[];el("bulkDialog").close()};
+el("bulkDrawBtn").onclick=startBulkDraw;
+el("bulkStopBtn").onclick=stopBulkSelect;
+el("bulkDoneBtn").onclick=()=>{
+  if(!bulkSelectedItems.length){showToast("Selecteer eerst één of meer huizen");return;}
+  applyBulkStatus("done");
+};
+el("bulkMoreBtn").onclick=()=>{
+  if(!bulkSelectedItems.length){showToast("Selecteer eerst één of meer huizen");return;}
+  el("bulkCount").textContent=bulkSelectedItems.length;
+  el("bulkDialog").showModal();
+};
+
+el("closeBulk").onclick=()=>el("bulkDialog").close();
+el("bulkCancel").onclick=()=>el("bulkDialog").close();
 document.querySelectorAll("[data-bulk-status]").forEach(b=>b.onclick=()=>applyBulkStatus(b.dataset.bulkStatus));
 el("menuBtn").onclick=()=>el("menuDialog").showModal();
 el("closeMenu").onclick=()=>el("menuDialog").close();
 el("closeItem").onclick=()=>el("itemDialog").close();
-el("streetMode").onclick=()=>{currentMode="street";el("streetMode").classList.add("active");el("houseMode").classList.remove("active");applyModeVisibility();el("menuDialog").close()};
+el("streetMode").onclick=()=>{if(bulkSelectMode)stopBulkSelect();currentMode="street";el("streetMode").classList.add("active");el("houseMode").classList.remove("active");applyModeVisibility();el("menuDialog").close()};
 el("houseMode").onclick=()=>{currentMode="house";el("houseMode").classList.add("active");el("streetMode").classList.remove("active");applyModeVisibility();el("menuDialog").close();if(map.getZoom()<16)map.easeTo({zoom:17})};
 document.querySelectorAll(".chip").forEach(c=>c.onclick=()=>{
   currentFilter=c.dataset.filter;document.querySelectorAll(".chip").forEach(x=>x.classList.toggle("active",x===c));updateStatusVisuals()
