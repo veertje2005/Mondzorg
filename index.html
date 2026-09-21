@@ -225,7 +225,7 @@ dialog::backdrop{background:rgba(26,24,35,.45)}
 
 <main class="map-wrap">
   <div id="map"></div>
-  <div class="mode-pill" id="modePill">Straten · grijs = nog te doen</div>
+  <div class="mode-pill" id="modePill">Straten · dunne straatsecties van ±50 meter</div>
   <div class="loader hidden" id="loader">Kaart laden</div>
   <div class="selection-box hidden" id="selectionBox"></div>
   <div class="select-mode-tip hidden" id="selectModeTip">Sleep een vak over de huizen</div>
@@ -286,7 +286,7 @@ dialog::backdrop{background:rgba(26,24,35,.45)}
       <button class="menu-action" id="changeName">Naam wijzigen</button>
       <button class="menu-action" id="reloadBtn">Voortgang vernieuwen</button>
     </section>
-    <p class="help">De paarse stippellijn is de dorpsgrens. In Straten wordt de kaart vanaf voldoende inzoomen verdeeld in secties van ongeveer 25 meter. Tik op een sectie om deze op Nog te doen, Bezig of Afgerond te zetten. Een fout afgevinkt deel kunt u altijd opnieuw openen en terugzetten. In Huizen blijven afgeronde straten zichtbaar; via “Selecteer huizen” kunt u losse huizen aantikken of met “Vak” meerdere huizen tegelijk selecteren. Houd een straatdeel of huis ingedrukt om het direct af te ronden.</p>
+    <p class="help">De paarse stippellijn is de dorpsgrens. In Straten wordt de kaart vanaf voldoende inzoomen zichtbaar verdeeld in losse secties van ongeveer 50 meter. Tik op een sectie om deze op Nog te doen, Bezig of Afgerond te zetten. Een fout afgevinkt deel kunt u altijd opnieuw openen en terugzetten. In Huizen blijven afgeronde straten zichtbaar; via “Selecteer huizen” kunt u losse huizen aantikken of met “Vak” meerdere huizen tegelijk selecteren. Houd een straatdeel of huis ingedrukt om het direct af te ronden.</p>
   </div>
 </dialog>
 
@@ -326,6 +326,7 @@ dialog::backdrop{background:rgba(26,24,35,.45)}
       <button class="s-doing" data-status="doing">Bezig</button>
       <button class="s-done" data-status="done">Afgerond</button>
     </div>
+    <div id="itemSavedInfo" class="help hidden" style="margin:10px 0 0"></div>
     <div class="fields">
       <label>Door<input id="personInput"></label>
       <label>Datum<input id="dateInput" type="date"></label>
@@ -373,7 +374,7 @@ let bulkSelectedItems=[];
 let bulkStart=null;
 let streetSegmentSignature="";
 let streetSegmentRefreshTimer=null;
-const STREET_SEGMENT_METERS=25;
+const STREET_SEGMENT_METERS=50;
 
 function slug(s){return String(s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,120)}
 function streetId(place,name){return `street:${slug(place)}:${slug(name)}`}
@@ -383,6 +384,57 @@ function houseId(place,num,lon,lat){
   return `house:${slug(place)}:${slug(num)}:${safeLat}:${safeLon}`;
 }
 function stateFor(id){return states.get(id)||{status:"todo",person:"",status_date:null,flyers:0,note:""}}
+
+function nearestSavedStreetSegment(streetName,lat,lon,maxMeters=22){
+  if(!Number.isFinite(Number(lat)) || !Number.isFinite(Number(lon))) return null;
+  let best=null,bestD=Infinity;
+  for(const s of states.values()){
+    if(s.item_type!=="street") continue;
+    if(!String(s.id||"").startsWith("streetseg:")) continue;
+    if(s.place!==currentPlace) continue;
+    if(String(s.street_name||"").toLowerCase()!==String(streetName||"").toLowerCase()) continue;
+    if(!Number.isFinite(Number(s.lat)) || !Number.isFinite(Number(s.lon))) continue;
+    const d=meterDistance([Number(lon),Number(lat)],[Number(s.lon),Number(s.lat)]);
+    if(d<bestD){bestD=d;best=s;}
+  }
+  return bestD<=maxMeters ? best : null;
+}
+
+function resolveItemState(item){
+  if(!item) return {status:"todo",person:"",status_date:null,flyers:0,note:""};
+
+  const exact=states.get(item.id);
+  if(exact) return exact;
+
+  if(item.item_type==="street" && String(item.id||"").startsWith("streetseg:")){
+    const nearby=nearestSavedStreetSegment(item.street_name,item.lat,item.lon);
+    if(nearby) return nearby;
+
+    // Oude gegevens waarbij de hele straat in één keer was opgeslagen:
+    // toon die status/notitie ook bij het aangeklikte straatdeel.
+    const whole=states.get(streetId(item.place,item.street_name));
+    if(whole) return whole;
+  }
+
+  return {status:"todo",person:"",status_date:null,flyers:0,note:""};
+}
+
+function editableRowId(item){
+  if(!item) return null;
+  if(states.has(item.id)) return item.id;
+
+  // Als dit huidige straatdeel overeenkomt met een eerder opgeslagen straatdeel,
+  // bewerk dan die bestaande rij zodat notities van andere gebruikers niet verloren gaan.
+  if(item.item_type==="street" && String(item.id||"").startsWith("streetseg:")){
+    const nearby=nearestSavedStreetSegment(item.street_name,item.lat,item.lon);
+    if(nearby) return nearby.id;
+  }
+
+  // Als alleen een oude "hele straat"-status bestaat, maken we juist een
+  // nieuw specifiek straatdeel aan. Zo kan één deel worden aangepast zonder
+  // de hele straat ineens te veranderen.
+  return item.id;
+}
 function showToast(msg){el("toast").textContent=msg;el("toast").classList.add("show");clearTimeout(toastTimer);toastTimer=setTimeout(()=>el("toast").classList.remove("show"),1800)}
 function setLoading(on,text="Kaart laden"){el("loader").textContent=text;el("loader").classList.toggle("hidden",!on)}
 function today(){return new Date().toISOString().slice(0,10)}
@@ -551,10 +603,14 @@ function setupTodoLayers(){
 
   safeAddLayer({
     id:"street-segments-line",type:"line",source:"street-segments",minzoom:14,
+    layout:{
+      "line-cap":"round",
+      "line-join":"round"
+    },
     paint:{
       "line-color":["match",["get","status"],"doing",STATUS.doing,"done",STATUS.done,STATUS.todo],
-      "line-width":["interpolate",["linear"],["zoom"],14,4,16,6,19,8],
-      "line-opacity":0.98
+      "line-width":["interpolate",["linear"],["zoom"],14,2.2,16,3.2,19,4.5],
+      "line-opacity":1
     }
   });
   safeAddLayer({
@@ -565,8 +621,7 @@ function setupTodoLayers(){
       "line-opacity":0.001
     }
   });
-
-  safeAddLayer({
+safeAddLayer({
     id:"todo-streets",type:"line",source:vectorSource,"source-layer":"transportation_name",
     minzoom:12,
     filter:["has","name"],
@@ -686,27 +741,82 @@ function lineMidpoint(coords){
 }
 function splitLine(coords,maxMeters=STREET_SEGMENT_METERS){
   if(!Array.isArray(coords)||coords.length<2)return [];
-  const out=[]; let current=[coords[0]],remaining=maxMeters;
+
+  const raw=[];
+  let current=[coords[0]],remaining=maxMeters;
+
   for(let i=1;i<coords.length;i++){
     let a=current[current.length-1],b=coords[i],d=meterDistance(a,b);
     if(!Number.isFinite(d)||d<=0){current.push(b);continue}
+
     while(d>remaining){
       const cut=lerpCoord(a,b,remaining/d);
-      current.push(cut); if(current.length>1)out.push(current);
-      current=[cut]; a=cut; d=meterDistance(a,b); remaining=maxMeters;
+      current.push(cut);
+      if(current.length>1) raw.push(current);
+      current=[cut];
+      a=cut;
+      d=meterDistance(a,b);
+      remaining=maxMeters;
     }
-    current.push(b); remaining-=d;
-    if(remaining<=1){if(current.length>1)out.push(current);current=[b];remaining=maxMeters}
+
+    current.push(b);
+    remaining-=d;
+
+    if(remaining<=1){
+      if(current.length>1) raw.push(current);
+      current=[b];
+      remaining=maxMeters;
+    }
   }
-  if(current.length>1&&meterDistance(current[0],current[current.length-1])>3)out.push(current);
-  return out;
+
+  if(current.length>1&&meterDistance(current[0],current[current.length-1])>3){
+    raw.push(current);
+  }
+
+  // Maak de straatdelen zichtbaar als losse blokjes door aan beide kanten
+  // een klein stukje weg te laten.
+  const trimMeters=1.5;
+
+  function trimFromStart(line,meters){
+    const out=[...line];
+    let left=meters;
+    while(out.length>=2 && left>0){
+      const a=out[0], b=out[1];
+      const d=meterDistance(a,b);
+      if(!Number.isFinite(d)||d<=0){out.shift();continue}
+      if(d<=left){
+        out.shift();
+        left-=d;
+      }else{
+        out[0]=lerpCoord(a,b,left/d);
+        left=0;
+      }
+    }
+    return out;
+  }
+
+  function trimFromEnd(line,meters){
+    return trimFromStart([...line].reverse(),meters).reverse();
+  }
+
+  return raw
+    .map(line=>trimFromEnd(trimFromStart(line,trimMeters),trimMeters))
+    .filter(line=>line.length>=2&&meterDistance(line[0],line[line.length-1])>3);
 }
 function segmentId(place,name,coords){
   const mid=lineMidpoint(coords)||coords[0];
   return `streetseg:${slug(place)}:${slug(name)}:${mid[1].toFixed(5)}:${mid[0].toFixed(5)}`;
 }
-function segmentState(id,streetName){
-  return states.get(id)||states.get(streetId(currentPlace,streetName))||null;
+function segmentState(id,streetName,mid=null){
+  const exact=states.get(id);
+  if(exact) return exact;
+
+  if(mid){
+    const nearby=nearestSavedStreetSegment(streetName,mid[1],mid[0]);
+    if(nearby) return nearby;
+  }
+
+  return states.get(streetId(currentPlace,streetName))||null;
 }
 function refreshStreetSegments(){
   if(!mapReady||!vectorSource||!map.getSource("street-segments"))return;
@@ -725,7 +835,7 @@ function refreshStreetSegments(){
       for(const coords of splitLine(line,STREET_SEGMENT_METERS)){
         const mid=lineMidpoint(coords); if(!mid||!inCurrentPlace(mid[0],mid[1]))continue;
         const id=segmentId(currentPlace,name,coords); if(features.has(id))continue;
-        const saved=segmentState(id,name); const status=saved?.status||"todo";
+        const saved=segmentState(id,name,mid); const status=saved?.status||"todo";
         features.set(id,{type:"Feature",geometry:{type:"LineString",coordinates:coords},properties:{id,status,name,street_name:name,lat:mid[1],lon:mid[0]}});
       }
     }
@@ -856,7 +966,7 @@ function applyModeVisibility(){
   el("bulkSelectFab").classList.toggle("hidden", currentMode!=="house");
 
   el("modePill").textContent=currentMode==="street"
-    ?(map.getZoom()>=14?"Straten · secties van ±25 meter":"Straten · zoom in voor kleinere secties")
+    ?(map.getZoom()>=14?"Straten · dunne straatsecties van ±50 meter":"Straten · zoom in voor kleinere secties")
     :"Huizen · afgeronde straten blijven zichtbaar";
 }
 
@@ -1214,7 +1324,7 @@ async function applyBulkStatus(status){
 
   const now=new Date().toISOString();
   const rows=bulkSelectedItems.map(item=>{
-    const old=stateFor(item.id);
+    const old=resolveItemState(item);
     return {
       id:item.id,
       item_type:"house",
@@ -1255,7 +1365,7 @@ async function applyBulkStatus(status){
 }
 
 function openItem(item){
-  selectedItem=item; const s=stateFor(item.id); selectedStatus=s.status||"todo";
+  selectedItem=item; const s=resolveItemState(item); selectedStatus=s.status||"todo";
   el("itemType").textContent=item.item_type==="street"
     ? `${item.place} · ${String(item.id||"").startsWith("streetseg:")?"Straatdeel":"Straat"}`
     : `${item.place} · Huis`;
@@ -1264,6 +1374,18 @@ function openItem(item){
   el("dateInput").value=s.status_date||"";
   el("flyersInput").value=s.flyers||0;
   el("noteInput").value=s.note||"";
+  const info=el("itemSavedInfo");
+  if(info){
+    const hasSaved=(s.status&&s.status!=="todo")||s.note||s.person||s.status_date;
+    info.classList.toggle("hidden",!hasSaved);
+    if(hasSaved){
+      const who=s.person?` door ${s.person}`:"";
+      const when=s.status_date?` op ${s.status_date}`:"";
+      info.textContent=`Opgeslagen voortgang${who}${when}. U kunt deze gegevens bekijken en aanpassen.`;
+    }else{
+      info.textContent="";
+    }
+  }
   el("resetItemBtn").classList.toggle("hidden",(s.status||"todo")==="todo");
   document.querySelectorAll(".statuses button").forEach(b=>b.classList.toggle("selected",b.dataset.status===selectedStatus));
   el("itemDialog").showModal();
@@ -1274,8 +1396,9 @@ async function markDone(item){
     return;
   }
   const old=stateFor(item.id);
+  const targetId=editableRowId(item);
   const row={
-    id:item.id,item_type:item.item_type,place:item.place,name:item.name,
+    id:targetId,item_type:item.item_type,place:item.place,name:item.name,
     street_name:item.street_name,house_number:item.house_number,
     status:"done",person:currentUser,status_date:today(),flyers:old.flyers||0,note:old.note||null,
     lat:item.lat??old.lat??null,lon:item.lon??old.lon??null,updated_at:new Date().toISOString()
@@ -1434,8 +1557,9 @@ document.querySelectorAll(".statuses button").forEach(b=>b.onclick=()=>{
 });
 el("resetItemBtn").onclick=async()=>{
   if(!selectedItem)return;
-  const old=stateFor(selectedItem.id);
-  const row={id:selectedItem.id,item_type:selectedItem.item_type,place:selectedItem.place,name:selectedItem.name,
+  const old=resolveItemState(selectedItem);
+  const targetId=editableRowId(selectedItem);
+  const row={id:targetId,item_type:selectedItem.item_type,place:selectedItem.place,name:selectedItem.name,
     street_name:selectedItem.street_name,house_number:selectedItem.house_number,status:"todo",person:null,status_date:null,
     flyers:old.flyers||0,note:old.note||null,lat:selectedItem.lat??old.lat??null,lon:selectedItem.lon??old.lon??null,updated_at:new Date().toISOString()};
   const btn=el("resetItemBtn");btn.disabled=true;
@@ -1446,9 +1570,10 @@ el("resetItemBtn").onclick=async()=>{
 
 el("saveBtn").onclick=async()=>{
   if(!selectedItem)return;
-  const old=stateFor(selectedItem.id);
+  const old=resolveItemState(selectedItem);
+  const targetId=editableRowId(selectedItem);
   const row={
-    id:selectedItem.id,item_type:selectedItem.item_type,place:selectedItem.place,name:selectedItem.name,
+    id:targetId,item_type:selectedItem.item_type,place:selectedItem.place,name:selectedItem.name,
     street_name:selectedItem.street_name,house_number:selectedItem.house_number,
     status:selectedStatus,
     person:selectedStatus==="todo"?null:(el("personInput").value.trim()||currentUser||null),
