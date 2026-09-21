@@ -286,7 +286,7 @@ dialog::backdrop{background:rgba(26,24,35,.45)}
       <button class="menu-action" id="changeName">Naam wijzigen</button>
       <button class="menu-action" id="reloadBtn">Voortgang vernieuwen</button>
     </section>
-    <p class="help">De paarse stippellijn is de dorpsgrens. Alleen straten en huizen binnen die grens zijn actief. In Huizen blijven afgeronde straten groen en straten die bezig zijn oranje zichtbaar. Afgeronde huizen vervangen de grijze stip, blijven na opnieuw openen groen zichtbaar en zijn als enige huisstatus ook zichtbaar wanneer u terugschakelt naar Straten. Huisnummers verschijnen automatisch wanneer u voldoende inzoomt. Houd een straat of huis ingedrukt om deze direct af te ronden; tik kort voor meer opties. In Straten wordt iedere straat vanaf voldoende inzoomen automatisch verdeeld in stukken van ongeveer 25 meter. Zo kunt u precies het laatste deel op Bezig of Afgerond zetten en zien anderen waar u bent gestopt. Een groen of oranje straatdeel kunt u altijd opnieuw aantikken en terugzetten naar Nog te doen. De straat is nu opgedeeld in kleinere stukken van ongeveer 25 meter, zodat u veel nauwkeuriger kunt aangeven waar u bent gestopt. In Huizen staat er per adres één bolletje; via “Selecteer huizen” kunt u losse huizen aantikken of met “Vak” meerdere huizen tegelijk selecteren.</p>
+    <p class="help">De paarse stippellijn is de dorpsgrens. Alleen straten en huizen binnen die grens zijn actief. In Huizen blijven afgeronde straten groen en straten die bezig zijn oranje zichtbaar. Afgeronde huizen vervangen de grijze stip, blijven na opnieuw openen groen zichtbaar en zijn als enige huisstatus ook zichtbaar wanneer u terugschakelt naar Straten. Huisnummers verschijnen automatisch wanneer u voldoende inzoomt. Houd een straat of huis ingedrukt om deze direct af te ronden; tik kort voor meer opties. In Straten wordt iedere straat vanaf voldoende inzoomen automatisch verdeeld in stukken van ongeveer 25 meter. Zo kunt u precies het laatste deel op Bezig of Afgerond zetten en zien anderen waar u bent gestopt. Een groen of oranje straatdeel kunt u altijd opnieuw aantikken en terugzetten naar Nog te doen. De straat is opgedeeld in kleinere stukken van ongeveer 25 meter. Tik op een stuk om het te bewerken of houd het ingedrukt om het direct af te ronden. In Huizen staat er per adres één bolletje; via “Selecteer huizen” kunt u losse huizen aantikken of met “Vak” meerdere huizen tegelijk selecteren.</p>
   </div>
 </dialog>
 
@@ -574,6 +574,10 @@ function setupTodoLayers(){
   });
 
 
+  if(!map.getSource("app-street-segments")){
+    map.addSource("app-street-segments",{type:"geojson",data:{type:"FeatureCollection",features:[]}});
+  }
+
   safeAddLayer({
     id:"app-street-segments",type:"line",source:"app-street-segments",minzoom:14,
     paint:{
@@ -634,9 +638,6 @@ function setupTodoLayers(){
   }
   if(!map.getSource("app-houses")){
     map.addSource("app-houses",{type:"geojson",data:{type:"FeatureCollection",features:[]}});
-  }
-  if(!map.getSource("app-street-segments")){
-    map.addSource("app-street-segments",{type:"geojson",data:{type:"FeatureCollection",features:[]}});
   }
   safeAddLayer({
     id:"app-house-dots",type:"circle",source:"app-houses",minzoom:16,
@@ -1234,7 +1235,7 @@ function identify(point,lngLat=null){
     // Vanaf zoom 14 werken we met kleine straatdelen.
     if(map.getZoom()>=14 && map.getLayer("app-street-segments-hitbox")){
       let segs=map.queryRenderedFeatures(
-        [[point.x-14,point.y-14],[point.x+14,point.y+14]],
+        [[point.x-18,point.y-18],[point.x+18,point.y+18]],
         {layers:["app-street-segments"]}
       )||[];
       if(!segs.length){
@@ -1467,18 +1468,16 @@ async function applyBulkStatus(status){
 
 function openItem(item){
   selectedItem=item; const s=stateFor(item.id); selectedStatus=s.status||"todo";
-  el("itemType").textContent=item.item_type==="street" ? `${item.place} · Straat` : `${item.place} · Huis`;
+  el("itemType").textContent=item.item_type==="street"
+    ? `${item.place} · ${String(item.id||"").startsWith("streetseg:") ? "Straatdeel" : "Straat"}`
+    : `${item.place} · Huis`;
   el("itemTitle").textContent=item.name;
   el("personInput").value=s.person||currentUser||"";
   el("dateInput").value=s.status_date||"";
   el("flyersInput").value=s.flyers||0;
   el("noteInput").value=s.note||"";
   el("resetItemBtn")?.classList.toggle("hidden",(s.status||"todo")==="todo");
-  map.on("moveend",()=>{scheduleHouseRefresh();scheduleStreetSegmentRefresh();});
-map.on("zoomend",()=>{scheduleHouseRefresh();scheduleStreetSegmentRefresh();applyModeVisibility();});
-map.on("idle",()=>{scheduleHouseRefresh();scheduleStreetSegmentRefresh();});
-
-document.querySelectorAll(".statuses button").forEach(b=>b.classList.toggle("selected",b.dataset.status===selectedStatus));
+  document.querySelectorAll(".statuses button").forEach(b=>b.classList.toggle("selected",b.dataset.status===selectedStatus));
   el("itemDialog").showModal();
 }
 async function markDone(item){
@@ -1583,38 +1582,55 @@ map.on("click","app-house-hitbox",e=>{
 });
 
 
-map.on("click","app-street-segments-hitbox",e=>{
-  if(currentMode!=="street" || map.getZoom()<14) return;
-  if(longFired){longFired=false;return;}
+function openStreetSegmentAtPoint(point,fallbackFeatures=[]){
+  if(currentMode!=="street" || map.getZoom()<14) return false;
 
-  // Zoek rond het tikpunt in de zichtbare straatdelen. Als er meerdere
-  // straatdelen exact over elkaar liggen, krijgt een bestaande status
-  // (groen/oranje) voorrang boven grijs. Zo kunt u een fout afgerond
-  // straatdeel altijd weer openen en terugzetten.
   let candidates=[];
   try{
     candidates=map.queryRenderedFeatures(
-      [[e.point.x-14,e.point.y-14],[e.point.x+14,e.point.y+14]],
+      [[point.x-16,point.y-16],[point.x+16,point.y+16]],
       {layers:["app-street-segments"]}
     )||[];
   }catch(_){}
 
-  if(!candidates.length && e.features?.length) candidates=[...e.features];
+  if(!candidates.length && fallbackFeatures?.length) candidates=[...fallbackFeatures];
+  if(!candidates.length) return false;
 
   const rank={done:3,doing:2,todo:1};
   candidates.sort((a,b)=>(rank[b.properties?.status]||0)-(rank[a.properties?.status]||0));
 
   const item=streetSegmentItemFromFeature(candidates[0]);
-  if(item) openItem(item);
+  if(!item) return false;
+  openItem(item);
+  return true;
+}
+
+map.on("click","app-street-segments-hitbox",e=>{
+  if(longFired){longFired=false;return;}
+  openStreetSegmentAtPoint(e.point,e.features);
+});
+
+map.on("click","app-street-segments",e=>{
+  if(longFired){longFired=false;return;}
+  openStreetSegmentAtPoint(e.point,e.features);
 });
 
 map.on("click",e=>{
   if(longFired){longFired=false;return}
   if(currentMode==="house") return; // Huizen worden door app-house-hitbox afgehandeld.
-  if(currentMode==="street" && map.getZoom()>=14) return; // Straatdelen hebben hun eigen kliklaag.
+
+  if(currentMode==="street" && map.getZoom()>=14){
+    // Extra fallback voor mobiel: probeer altijd een straatdeel rond het tikpunt.
+    if(openStreetSegmentAtPoint(e.point,[])) return;
+  }
+
   const item=identify(e.point,e.lngLat);
   if(item)openItem(item);
 });
+
+map.on("moveend",()=>{scheduleHouseRefresh();scheduleStreetSegmentRefresh();});
+map.on("zoomend",()=>{scheduleHouseRefresh();scheduleStreetSegmentRefresh();applyModeVisibility();});
+map.on("idle",()=>{scheduleHouseRefresh();scheduleStreetSegmentRefresh();});
 
 document.querySelectorAll(".statuses button").forEach(b=>b.onclick=()=>{
   selectedStatus=b.dataset.status;
